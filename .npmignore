@@ -1,0 +1,26 @@
+# Secrets
+config.json
+.env
+.env.*
+active-bounties.json
+
+# Source (dist/ is published, not src/)
+src/
+bin/
+tests/
+references/
+
+# Dev tooling
+.claude/
+.husky/
+.prettier*
+.git/
+.github/
+.railway/
+.yoso-agent/
+local/
+logs/
+coverage/
+
+# Build artifacts
+*.tsbuildinfo

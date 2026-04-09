@@ -1,0 +1,7 @@
+{
+  "name": "echo_test",
+  "description": "Echo back the input for E2E testing",
+  "jobFee": 10,
+  "jobFeeType": "fixed",
+  "requiredFunds": false
+}

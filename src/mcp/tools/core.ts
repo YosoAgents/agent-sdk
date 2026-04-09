@@ -1,0 +1,228 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import axios from "axios";
+import client from "../../lib/client.js";
+import { processNegotiationPhase } from "../../lib/api.js";
+import { getValidSessionToken, createAgentApi } from "../../lib/auth.js";
+
+const SEARCH_URL = process.env.YOSO_SEARCH_URL || "https://yoso.bet/api/agents/search";
+
+function ok(data: unknown) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(data) }],
+  };
+}
+
+function err(error: string) {
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify({ success: false, error }) }],
+  };
+}
+
+export function registerCoreTools(server: McpServer): void {
+  // 1. browse_agents — search marketplace for agents and offerings
+  server.tool(
+    "browse_agents",
+    "Search the YOSO marketplace for agents and offerings",
+    {
+      query: z.string().min(1).max(500).describe("Search query"),
+      limit: z.number().positive().max(50).optional().describe("Max results (max 50)"),
+    },
+    async ({ query, limit }) => {
+      try {
+        const params: Record<string, string> = {
+          query,
+          yoso: "true",
+          topK: String(limit ?? 5),
+        };
+        const response = await axios.get<{ data: unknown[] }>(SEARCH_URL, { params });
+        const agents = response.data?.data;
+        if (!agents || !Array.isArray(agents) || agents.length === 0) {
+          return ok({ success: true, agents: [], message: `No agents found for "${query}"` });
+        }
+        return ok({ success: true, agents });
+      } catch (e) {
+        return err(`Search failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  );
+
+  // 2. hire_agent — create a job to hire an agent
+  server.tool(
+    "hire_agent",
+    "Create a job to hire an agent for a specific offering",
+    {
+      agent_wallet: z
+        .string()
+        .regex(/^0x[a-fA-F0-9]{40}$/, "Must be a valid Ethereum address")
+        .describe("Agent wallet address"),
+      offering_name: z.string().min(1).max(100).describe("Name of the offering"),
+      requirements: z.string().max(10_000).optional().describe("Job requirements (JSON string)"),
+    },
+    async ({ agent_wallet, offering_name, requirements }) => {
+      try {
+        let serviceRequirements = {};
+        if (requirements) {
+          try {
+            serviceRequirements = JSON.parse(requirements);
+          } catch {
+            return err("Invalid JSON in requirements parameter");
+          }
+        }
+        const response = await client.post<{ data: { jobId: number } }>("/agents/jobs", {
+          providerWalletAddress: agent_wallet,
+          jobOfferingName: offering_name,
+          serviceRequirements,
+          isAutomated: true,
+        });
+        const jobId = response.data.data?.jobId ?? (response.data as any).jobId;
+        return ok({ success: true, jobId });
+      } catch (e) {
+        return err(`Failed to create job: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  );
+
+  // 3. job_status — check job status
+  server.tool(
+    "job_status",
+    "Check the status of a job",
+    { job_id: z.string().regex(/^\d+$/, "Must be a numeric job ID").describe("Job ID") },
+    async ({ job_id }) => {
+      try {
+        const response = await client.get(`/agents/jobs/${job_id}`);
+        const data = response.data?.data;
+        if (!data) {
+          return err(`Job not found: ${job_id}`);
+        }
+        return ok({
+          success: true,
+          job: {
+            jobId: data.id,
+            phase: data.phase,
+            providerName: data.providerName ?? null,
+            providerWalletAddress: data.providerAddress ?? null,
+            clientName: data.clientName ?? null,
+            clientWalletAddress: data.clientAddress ?? null,
+            expiry: data.expiry ?? null,
+            paymentRequestData: data.paymentRequestData ?? null,
+            deliverable: data.deliverable ?? null,
+            memos: (data.memos || []).map(
+              (m: { nextPhase: string; content: string; createdAt: string; status: string }) => ({
+                nextPhase: m.nextPhase,
+                content: m.content,
+                createdAt: m.createdAt,
+                status: m.status,
+              })
+            ),
+          },
+        });
+      } catch (e) {
+        return err(`Failed to get job status: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  );
+
+  // 4. job_approve_payment — accept or reject a payment request
+  server.tool(
+    "job_approve_payment",
+    "Accept or reject a payment request for a job",
+    {
+      job_id: z.string().regex(/^\d+$/, "Must be a numeric job ID").describe("Job ID"),
+      approve: z.boolean().describe("Whether to approve the payment"),
+    },
+    async ({ job_id, approve }) => {
+      try {
+        await processNegotiationPhase(Number(job_id), { accept: approve });
+        return ok({ success: true, jobId: Number(job_id), approved: approve });
+      } catch (e) {
+        return err(`Failed to process payment: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  );
+
+  // 5. register_agent — register a new agent (requires active session)
+  server.tool(
+    "register_agent",
+    "Register this agent with the YOSO marketplace",
+    {
+      name: z.string().min(1).max(100).describe("Agent name"),
+      description: z.string().max(500).optional().describe("Agent description"),
+    },
+    async ({ name }) => {
+      try {
+        const sessionToken = getValidSessionToken();
+        if (!sessionToken) {
+          return err("No valid session. Run `yoso-agent login` first to authenticate.");
+        }
+        const result = await createAgentApi(sessionToken, name);
+        return ok({
+          success: true,
+          agent: {
+            id: result.id,
+            name: result.name,
+            walletAddress: result.walletAddress,
+          },
+        });
+      } catch (e) {
+        return err(`Failed to register agent: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  );
+
+  // 6. list_offerings — list offerings from an agent (own or by wallet)
+  server.tool(
+    "list_offerings",
+    "List available offerings from an agent",
+    {
+      agent_wallet: z
+        .string()
+        .regex(/^0x[a-fA-F0-9]{40}$/, "Must be a valid Ethereum address")
+        .optional()
+        .describe("Agent wallet (omit for own offerings)"),
+    },
+    async ({ agent_wallet }) => {
+      try {
+        if (!agent_wallet) {
+          // Own offerings via authenticated /agents/me
+          const response = await client.get("/agents/me");
+          const data = response.data?.data;
+          if (!data) {
+            return err("Could not fetch agent info. Is an agent active?");
+          }
+          return ok({
+            success: true,
+            agent: data.name,
+            offerings: data.jobs ?? [],
+          });
+        }
+        // Other agent — search by wallet address
+        const response = await axios.get<{ data: any[] }>(SEARCH_URL, {
+          params: { query: agent_wallet, yoso: "true", topK: "10" },
+        });
+        const agents = response.data?.data;
+        if (!agents || !Array.isArray(agents)) {
+          return ok({ success: true, agent: agent_wallet, offerings: [] });
+        }
+        const match = agents.find(
+          (a: any) => a.walletAddress?.toLowerCase() === agent_wallet.toLowerCase()
+        );
+        if (!match) {
+          return ok({
+            success: true,
+            agent: agent_wallet,
+            offerings: [],
+            message: "Agent not found",
+          });
+        }
+        return ok({
+          success: true,
+          agent: match.name,
+          offerings: match.jobs ?? [],
+        });
+      } catch (e) {
+        return err(`Failed to list offerings: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  );
+}
