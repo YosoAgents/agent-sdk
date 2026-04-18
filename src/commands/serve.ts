@@ -157,13 +157,9 @@ export async function stop(): Promise<void> {
     );
   }
 
-  // Wait and verify
   let stopped = false;
   for (let i = 0; i < 10; i++) {
-    const start = Date.now();
-    while (Date.now() - start < 200) {
-      /* busy wait 200ms */
-    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
     if (!isProcessRunning(pid)) {
       stopped = true;
       break;

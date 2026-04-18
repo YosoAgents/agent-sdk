@@ -9,6 +9,7 @@ import {
   assertSecretsNotTracked,
   ensureGitignored,
 } from "../src/lib/git-guard.js";
+import { preflightStorage } from "../src/lib/wallet-storage.js";
 
 let tempRoot: string;
 
@@ -127,5 +128,23 @@ describe("git-guard", () => {
     expect(gi).toContain("node_modules/");
     expect(gi).toContain("# yoso-agent");
     expect(gi).toContain(".env");
+  });
+
+  it("preflightStorage adds the SDK's managed-file entries to .gitignore", () => {
+    gitInit(tempRoot);
+    preflightStorage(tempRoot);
+    const gi = fs.readFileSync(path.join(tempRoot, ".gitignore"), "utf-8");
+    expect(gi).toContain(".env");
+    expect(gi).toContain("config.json");
+    expect(gi).toContain("keystores/");
+    expect(gi).toContain("logs/");
+  });
+
+  it("preflightStorage throws when a managed-file entry is actively negated", () => {
+    // Regression: this throw must fire at preflight time, not during storeAgentKey,
+    // otherwise a failure here would leave an orphaned server-side agent behind.
+    gitInit(tempRoot);
+    fs.writeFileSync(path.join(tempRoot, ".gitignore"), "*.json\n!config.json\n");
+    expect(() => preflightStorage(tempRoot)).toThrow(/negation/);
   });
 });

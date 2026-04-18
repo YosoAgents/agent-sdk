@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import client from "../lib/client.js";
 import { formatPrice, getActiveAgent } from "../lib/config.js";
 import * as output from "../lib/output.js";
@@ -30,6 +31,7 @@ export async function create(
       jobOfferingName,
       serviceRequirements,
       isAutomated,
+      clientOperationId: randomUUID(),
     });
 
     output.output(job.data, (data) => {
@@ -307,7 +309,7 @@ export async function status(jobId: string): Promise<void> {
       output.field("Client Wallet", r.clientWalletAddress || "-");
       output.field("Provider", r.providerName || "-");
       output.field("Provider Wallet", r.providerWalletAddress || "-");
-      output.field("Expiry", new Date(r.expiry * 1000).toISOString() ?? "-");
+      output.field("Expiry", r.expiry ? new Date(r.expiry * 1000).toISOString() : "-");
 
       if (r.paymentRequestData) {
         output.log(`\n  Payment Request Data:\n    ${JSON.stringify(r.paymentRequestData)}`);

@@ -2,7 +2,7 @@ import axios, { type AxiosInstance } from "axios";
 import http from "http";
 import https from "https";
 
-export const DEFAULT_SEARCH_URL = "https://yoso.bet/api/agents/search";
+export const DEFAULT_SEARCH_URL = "https://api.yoso.sh/api/agents/search";
 
 export function deriveSearchUrlFromApiUrl(apiUrl: string): string {
   const normalized = apiUrl.trim().replace(/\/+$/, "");

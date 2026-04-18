@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { pathToFileURL } from "url";
 import type { OfferingHandlers } from "./offeringTypes.js";
 import { ROOT } from "../../lib/config.js";
 
@@ -42,9 +43,8 @@ export async function loadOffering(
   const offeringsRoot = resolveOfferingsRoot(agentDirName);
   const offeringDir = path.resolve(offeringsRoot, offeringName);
 
-  // Verify resolved path stays under offerings root (prevents symlink escape)
-  const realOfferingDir = fs.existsSync(offeringDir) ? fs.realpathSync(offeringDir) : offeringDir;
   const realRoot = fs.existsSync(offeringsRoot) ? fs.realpathSync(offeringsRoot) : offeringsRoot;
+  const realOfferingDir = fs.existsSync(offeringDir) ? fs.realpathSync(offeringDir) : offeringDir;
   if (!isPathInside(realRoot, realOfferingDir)) {
     throw new Error(`Offering directory escapes offerings root: ${offeringName}`);
   }
@@ -53,16 +53,22 @@ export async function loadOffering(
   if (!fs.existsSync(configPath)) {
     throw new Error(`offering.json not found: ${configPath}`);
   }
-  const config: OfferingConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  const realConfigPath = fs.realpathSync(configPath);
+  if (!isPathInside(realRoot, realConfigPath)) {
+    throw new Error(`offering.json escapes offerings root: ${offeringName}`);
+  }
+  const config: OfferingConfig = JSON.parse(fs.readFileSync(realConfigPath, "utf-8"));
 
-  // handlers.ts (dynamically imported)
   const handlersPath = path.join(offeringDir, "handlers.ts");
   if (!fs.existsSync(handlersPath)) {
     throw new Error(`handlers.ts not found: ${handlersPath}`);
   }
+  const realHandlersPath = fs.realpathSync(handlersPath);
+  if (!isPathInside(realRoot, realHandlersPath)) {
+    throw new Error(`handlers.ts escapes offerings root: ${offeringName}`);
+  }
 
-  // Convert Windows path to file:// URL for ESM import()
-  const handlersUrl = new URL(`file:///${handlersPath.replace(/\\/g, "/")}`).href;
+  const handlersUrl = pathToFileURL(realHandlersPath).href;
   const imported = (await import(handlersUrl)) as OfferingHandlers & {
     default?: OfferingHandlers;
   };

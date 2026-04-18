@@ -1,8 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import client from "../../lib/client.js";
 import { processNegotiationPhase } from "../../lib/api.js";
-import { getValidSessionToken, createAgentApi } from "../../lib/auth.js";
 import { searchAgents } from "../../lib/search-client.js";
 import { parseRequirementsJson } from "../validation.js";
 
@@ -86,6 +86,7 @@ export function registerCoreTools(server: McpServer): void {
           jobOfferingName: offering_name,
           serviceRequirements: parsedRequirements.value,
           isAutomated: auto_pay,
+          clientOperationId: randomUUID(),
         });
         const jobId = response.data.data?.jobId ?? response.data.jobId;
         if (typeof jobId !== "number") {
@@ -156,32 +157,23 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 5. register_agent - register a new agent (requires active session)
+  // 5. register_agent — disabled in MCP. MCP tool responses are routinely
+  // persisted and paraphrased by hosts, so returning a freshly-generated
+  // wallet private key through this channel would break the "key never
+  // leaves your machine" invariant. Registration must go through the CLI.
   server.tool(
     "register_agent",
-    "Register this agent with the YOSO marketplace",
+    "Disabled in MCP — run `yoso-agent setup` in a terminal. MCP is not a safe channel for wallet private keys.",
     {
-      name: z.string().min(1).max(100).describe("Agent name"),
-      description: z.string().max(500).optional().describe("Agent description"),
+      name: z.string().min(1).max(100).optional().describe("Agent name (ignored)"),
+      description: z.string().max(500).optional().describe("Agent description (ignored)"),
     },
-    async ({ name }) => {
-      try {
-        const sessionToken = getValidSessionToken();
-        if (!sessionToken) {
-          return err("No valid session. Run `yoso-agent login` first to authenticate.");
-        }
-        const result = await createAgentApi(sessionToken, name);
-        return ok({
-          success: true,
-          agent: {
-            id: result.id,
-            name: result.name,
-            walletAddress: result.walletAddress,
-          },
-        });
-      } catch (e) {
-        return err(`Failed to register agent: ${e instanceof Error ? e.message : String(e)}`);
-      }
+    async () => {
+      return err(
+        "register_agent is disabled in MCP. Run `yoso-agent setup` in a terminal — " +
+          "the CLI writes the wallet key to .env (0o600) or an encrypted keystore. " +
+          "MCP tool responses are persisted by hosts and are not a safe channel for private keys."
+      );
     }
   );
 

@@ -12,17 +12,10 @@ import {
   type AgentEntry,
   findAgentByWalletAddress,
 } from "../lib/config.js";
-import {
-  getValidSessionToken,
-  fetchAgents,
-  createAgentApi,
-  regenerateApiKey,
-  syncAgentsToConfig,
-  isAgentApiKeyValid,
-} from "../lib/auth.js";
+import { createAgentApi, regenerateApiKey, isAgentApiKeyValid } from "../lib/auth.js";
 import { hasEnvModeAgent } from "../lib/env-file.js";
 import { assertSecretsNotTracked } from "../lib/git-guard.js";
-import { storeAgentKey } from "../lib/wallet-storage.js";
+import { storeAgentKey, preflightStorage } from "../lib/wallet-storage.js";
 import { ROOT } from "../lib/paths.js";
 
 function redactApiKey(key: string | undefined): string {
@@ -44,18 +37,14 @@ function confirmPrompt(prompt: string): Promise<boolean> {
   });
 }
 
-function killSellerProcess(pid: number): boolean {
+async function killSellerProcess(pid: number): Promise<boolean> {
   try {
     process.kill(pid, "SIGTERM");
   } catch {
     return false;
   }
-  // Wait up to 2 seconds for process to stop
   for (let i = 0; i < 10; i++) {
-    const start = Date.now();
-    while (Date.now() - start < 200) {
-      /* busy wait */
-    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
     if (!isProcessRunning(pid)) {
       removePidFromConfig();
       return true;
@@ -100,7 +89,7 @@ export async function stopSellerIfRunning(): Promise<boolean> {
     return false;
   }
   output.log(`  Stopping seller runtime (PID ${sellerPid})...`);
-  const stopped = killSellerProcess(sellerPid);
+  const stopped = await killSellerProcess(sellerPid);
   if (stopped) {
     output.log(`  Seller runtime stopped.\n`);
     return true;
@@ -123,24 +112,9 @@ function displayAgents(agents: AgentEntry[]): void {
 }
 
 export async function list(): Promise<void> {
-  let agents: AgentEntry[];
-  const sessionToken = getValidSessionToken();
-
-  if (sessionToken) {
-    try {
-      const serverAgents = await fetchAgents(sessionToken);
-      agents = syncAgentsToConfig(serverAgents);
-    } catch (e) {
-      output.warn(
-        `Could not fetch agents from server: ${e instanceof Error ? e.message : String(e)}`
-      );
-      output.log("  Showing locally saved agents.\n");
-      agents = readConfig().agents ?? [];
-    }
-  } else {
-    output.log("  No browser session found. Showing locally saved agents.\n");
-    agents = readConfig().agents ?? [];
-  }
+  // In 0.3.0 the SDK is key-based (no session tokens). The old `/api/agents/lite`
+  // server-sync endpoint was never implemented, so local config is authoritative.
+  const agents: AgentEntry[] = readConfig().agents ?? [];
 
   if (agents.length === 0) {
     output.output({ agents: [] }, () => {
@@ -231,7 +205,7 @@ export async function switchAgent(walletAddress: string): Promise<void> {
     }
 
     if (!valid) {
-      const result = await regenerateApiKey(null, target.walletAddress);
+      const result = await regenerateApiKey(target.walletAddress);
       apiKey = result.apiKey;
     }
 
@@ -285,6 +259,14 @@ export async function create(name: string, options: CreateOptions = {}): Promise
     }
   }
 
+  // Runs in both modes, before any remote registration, so a tracked
+  // .gitignore target can't orphan a server-side agent.
+  try {
+    preflightStorage(ROOT);
+  } catch (e) {
+    output.fatal(e instanceof Error ? e.message : String(e));
+  }
+
   // Stop seller runtime if running (API key will change)
   const proceed = await stopSellerIfRunning();
   if (!proceed) {
@@ -293,7 +275,7 @@ export async function create(name: string, options: CreateOptions = {}): Promise
   }
 
   try {
-    const result = await createAgentApi(getValidSessionToken(), name);
+    const result = await createAgentApi(name);
     if (!result?.apiKey) {
       output.fatal("Create agent failed - no API key returned.");
     }

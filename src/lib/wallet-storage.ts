@@ -23,17 +23,30 @@ export interface StoreAgentKeyParams {
 }
 
 /**
- * Persist a server-returned agent wallet key to disk, following the active mode.
- *
- * - `useKeystore: false` (default): writes AGENT_PRIVATE_KEY into `.env`'s managed block, scaffolds `.gitignore`,
- *   and refuses if an unmanaged AGENT_PRIVATE_KEY with a different value already exists.
- * - `useKeystore: true`: encrypts the key into `keystores/<address>.json` via an interactive password prompt,
- *   then clears any prior env-mode managed block so signing doesn't pick up the stale `AGENT_PRIVATE_KEY` that
- *   bin/yoso-agent.ts auto-loaded from `.env` at CLI startup.
- *
- * Also updates `process.env.AGENT_PRIVATE_KEY` and `process.env.YOSO_AGENT_API_KEY` so the current process's
- * downstream signing/API calls use the newly active agent.
+ * Files and directories both storage modes write that must stay out of git.
+ * - `config.json` holds the agent's API key (bearer credential).
+ * - `.env` holds AGENT_PRIVATE_KEY (env mode only, but gitignored unconditionally
+ *   because the user may also use env mode in the future from the same dir).
+ * - `keystores/` holds encrypted wallet blobs (keystore mode).
+ * - `logs/` contains seller runtime logs that may echo request payloads.
  */
+const SDK_GITIGNORE_ENTRIES = [".env", "config.json", "keystores/", "logs/"];
+
+/**
+ * Storage preflight. Runs in both env and keystore modes. MUST be called
+ * before any remote agent registration: `ensureGitignored` throws if
+ * required entries can't be added because the target files are tracked,
+ * and if that throw comes after `createAgentApi`, the user is left with
+ * an orphaned server-side agent and no locally saved credentials.
+ */
+export function preflightStorage(root: string): void {
+  ensureGitignored(root, SDK_GITIGNORE_ENTRIES);
+}
+
+/** Persist the wallet key (`.env` managed block or encrypted keystore) and update
+ *  `process.env.AGENT_PRIVATE_KEY` / `YOSO_AGENT_API_KEY` for the current process.
+ *  Caller must run `preflightStorage(root)` before `createAgentApi` to keep
+ *  local write failures from orphaning a remote agent. */
 export async function storeAgentKey(params: StoreAgentKeyParams): Promise<StoredWalletKey> {
   const { root, privateKey, walletAddress, apiKey, useKeystore, warn } = params;
 
@@ -59,7 +72,6 @@ export async function storeAgentKey(params: StoreAgentKeyParams): Promise<Stored
     );
   }
 
-  ensureGitignored(root, [".env", "keystores/", "logs/"]);
   writeYosoBlock(root, { AGENT_PRIVATE_KEY: privateKey });
 
   process.env.AGENT_PRIVATE_KEY = privateKey;

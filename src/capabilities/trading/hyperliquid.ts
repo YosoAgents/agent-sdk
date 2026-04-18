@@ -185,6 +185,7 @@ export interface BracketOrderParams {
 }
 
 export class HyperliquidClient {
+  public readonly testnet: boolean;
   private readonly baseUrl: string;
   private readonly wallet: ethers.Wallet;
   private readonly address: string;
@@ -193,11 +194,16 @@ export class HyperliquidClient {
   private assetIndices: Map<string, number> = new Map();
   private xyzTickers: Set<string> = new Set();
 
-  // Mid-price cache with 2s TTL
   private midCache: Map<string, { price: number; ts: number }> = new Map();
   private static readonly MID_CACHE_TTL = 2000;
 
   constructor(config: HyperliquidConfig) {
+    if (!config.testnet && !config.allowLiveTrading) {
+      throw new Error(
+        "Hyperliquid mainnet refused: set HYPERLIQUID_ALLOW_LIVE_TRADING=true to acknowledge live-trading risk."
+      );
+    }
+    this.testnet = config.testnet;
     this.baseUrl = config.testnet ? TESTNET_URL : MAINNET_URL;
     this.wallet = new ethers.Wallet(config.privateKey);
     this.address = config.walletAddress;
@@ -235,7 +241,10 @@ export class HyperliquidClient {
         this.assetIndices.set(asset.name, XYZ_OFFSET + idx);
       });
     } catch (e) {
-      console.error("[hl] Failed to load XYZ metadata:", e instanceof Error ? e.message : e);
+      console.error(
+        "[hl] Failed to load XYZ metadata:",
+        e instanceof Error ? e.message : String(e)
+      );
     }
   }
 
@@ -351,7 +360,10 @@ export class HyperliquidClient {
       this.midCache.set(ticker, { price, ts: Date.now() });
       return price;
     } catch (e) {
-      console.error(`[hl] getMidPrice failed for ${ticker}:`, e instanceof Error ? e.message : e);
+      console.error(
+        `[hl] getMidPrice failed for ${ticker}:`,
+        e instanceof Error ? e.message : String(e)
+      );
       return null;
     }
   }
@@ -384,7 +396,10 @@ export class HyperliquidClient {
       }
       return candles.slice(-count);
     } catch (e) {
-      console.error(`[hl] getCandles failed for ${ticker}:`, e instanceof Error ? e.message : e);
+      console.error(
+        `[hl] getCandles failed for ${ticker}:`,
+        e instanceof Error ? e.message : String(e)
+      );
       return [];
     }
   }
@@ -589,20 +604,19 @@ export class HyperliquidClient {
         }
       }
 
-      // Parse children
       let childIdx = 1;
       if (tpPrice && childIdx < statuses.length) {
         const s = statuses[childIdx];
         if (typeof s === "object" && s.resting) out.tpOid = String(s.resting.oid);
         else if (s === "waitingForFill" && out.entryOid)
-          out.tpOid = String(parseInt(out.entryOid) + childIdx);
+          out.tpOid = (BigInt(out.entryOid) + BigInt(childIdx)).toString();
         childIdx++;
       }
       if (slPrice && childIdx < statuses.length) {
         const s = statuses[childIdx];
         if (typeof s === "object" && s.resting) out.slOid = String(s.resting.oid);
         else if (s === "waitingForFill" && out.entryOid)
-          out.slOid = String(parseInt(out.entryOid) + childIdx);
+          out.slOid = (BigInt(out.entryOid) + BigInt(childIdx)).toString();
       }
 
       return out;
@@ -779,7 +793,7 @@ export class HyperliquidClient {
         availableBalance: parseFloat(margin.totalRawUsd),
       };
     } catch (e) {
-      console.error("[hl] getAccountBalance failed:", e instanceof Error ? e.message : e);
+      console.error("[hl] getAccountBalance failed:", e instanceof Error ? e.message : String(e));
       return null;
     }
   }
@@ -789,7 +803,7 @@ export class HyperliquidClient {
     try {
       return await this.infoPost<unknown[]>("userFills", { user: this.address, startTime });
     } catch (e) {
-      console.error("[hl] getFills failed:", e instanceof Error ? e.message : e);
+      console.error("[hl] getFills failed:", e instanceof Error ? e.message : String(e));
       return [];
     }
   }

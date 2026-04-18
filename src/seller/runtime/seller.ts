@@ -2,6 +2,7 @@
 
 import { connectSellerSocket } from "./sellerSocket.js";
 import { acceptOrRejectJob, requestPayment, deliverJob } from "./sellerApi.js";
+import { getJobDetails } from "../../lib/api.js";
 import { loadOffering, listOfferings } from "./offerings.js";
 import { JobPhase, type JobEventData, type SignMemoRequestData } from "./types.js";
 import type { ExecuteJobResult } from "./offeringTypes.js";
@@ -44,7 +45,7 @@ function setupCleanupHandlers(): void {
   });
 }
 
-const MARKETPLACE_URL = process.env.YOSO_SOCKET_URL || "https://yoso.bet";
+const MARKETPLACE_URL = process.env.YOSO_SOCKET_URL || "https://api.yoso.sh";
 let agentDirName: string = "";
 let contractClient: ContractClient | null = null;
 
@@ -88,10 +89,8 @@ function parseNegotiationDetails(data: JobEventData): NegotiationDetails {
 async function handleNewTask(data: JobEventData): Promise<void> {
   const jobId = data.id;
 
-  console.log(`\n${"=".repeat(60)}`);
   console.log(`[seller] New task  jobId=${jobId}  phase=${JobPhase[data.phase] ?? data.phase}`);
   console.log(`         client=${data.clientAddress}  price=${data.price}`);
-  console.log(`${"=".repeat(60)}`);
 
   if (data.phase === JobPhase.REQUEST) {
     if (!data.memoToSign) {
@@ -149,7 +148,30 @@ async function handleNewTask(data: JobEventData): Promise<void> {
         reason: "Job accepted",
       });
 
-      // Run normal payment flow for all jobs
+      // The accept call may advance the job's phase server-side. Re-fetch the
+      // job before posting requestPayment so we don't race the server into a
+      // 409 on an already-advanced state machine. Concretely: if phase is no
+      // longer REQUEST after accept, the requestPayment memo slot is closed.
+      let postAcceptPhase: number | null = null;
+      try {
+        const details = await getJobDetails(jobId);
+        postAcceptPhase = details.phase;
+      } catch (err) {
+        console.log(
+          `[seller] Job ${jobId} phase lookup after accept failed (${
+            err instanceof Error ? err.message : String(err)
+          }); falling through to requestPayment once.`
+        );
+      }
+
+      if (postAcceptPhase !== null && postAcceptPhase !== JobPhase.REQUEST) {
+        console.log(
+          `[seller] Job ${jobId} advanced to phase ${JobPhase[postAcceptPhase] ?? postAcceptPhase} during accept; skipping requestPayment.`
+        );
+        return;
+      }
+
+      // Run normal payment flow for all jobs still in REQUEST.
       const funds =
         config.requiredFunds && handlers.requestAdditionalFunds
           ? await handlers.requestAdditionalFunds(requirements)
@@ -159,16 +181,30 @@ async function handleNewTask(data: JobEventData): Promise<void> {
         ? await handlers.requestPayment(requirements)
         : (funds?.content ?? "Request accepted");
 
-      await requestPayment(jobId, {
-        content: paymentReason,
-        payableDetail: funds
-          ? {
-              amount: funds.amount,
-              tokenAddress: funds.tokenAddress,
-              recipient: funds.recipient,
-            }
-          : undefined,
-      });
+      try {
+        await requestPayment(jobId, {
+          content: paymentReason,
+          payableDetail: funds
+            ? {
+                amount: funds.amount,
+                tokenAddress: funds.tokenAddress,
+                recipient: funds.recipient,
+              }
+            : undefined,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/409/.test(msg) || /Conflict/i.test(msg)) {
+          // Tolerate a narrow race where the buyer advanced the state machine
+          // between our phase check and the requestPayment POST. Warn rather
+          // than fatal — the downstream phase should still drive delivery.
+          console.warn(
+            `[seller] Job ${jobId} requestPayment returned 409 after phase check; job state advanced concurrently — continuing.`
+          );
+        } else {
+          throw err;
+        }
+      }
     } catch (err) {
       console.error(`[seller] Error processing job ${jobId}:`, err);
     }

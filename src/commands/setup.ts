@@ -4,21 +4,17 @@ import { readConfig, writeConfig, type AgentEntry } from "../lib/config.js";
 import { ROOT } from "../lib/paths.js";
 import { hasEnvModeAgent } from "../lib/env-file.js";
 import { assertSecretsNotTracked } from "../lib/git-guard.js";
-import { storeAgentKey } from "../lib/wallet-storage.js";
-import {
-  ensureSessionIfAvailable,
-  interactiveLogin,
-  fetchAgents,
-  createAgentApi,
-  syncAgentsToConfig,
-  type AgentInfoResponse,
-} from "../lib/auth.js";
+import { storeAgentKey, preflightStorage } from "../lib/wallet-storage.js";
+import { createAgentApi, interactiveLogin } from "../lib/auth.js";
 import { stopSellerIfRunning, switchAgent } from "./agent.js";
+import { promptFundAndPoll } from "../lib/fund-and-poll.js";
 
 export interface SetupOptions {
   agentName?: string;
   skipSystemPrompt?: boolean;
   useKeystore?: boolean;
+  /** When true (or when stdout isn't a TTY), skip the interactive fund-and-poll. */
+  skipFundPoll?: boolean;
 }
 
 function question(rl: readline.Interface, prompt: string): Promise<string> {
@@ -31,10 +27,8 @@ function redactApiKey(key: string): string {
 }
 
 function preflightEnvMode(): void {
-  // Refuse if the existing .env or config.json would leak secrets when written.
   assertSecretsNotTracked(ROOT, [".env", "config.json"]);
 
-  // Refuse if switching in env mode would silently lose the current agent's key.
   if (hasEnvModeAgent(ROOT)) {
     throw new Error(
       "This directory already has an env-mode agent. Switching would overwrite " +
@@ -45,15 +39,34 @@ function preflightEnvMode(): void {
   }
 }
 
+/**
+ * Outcome of the setup's select-or-create flow.
+ *
+ * - `created`: a brand-new agent was registered on the server and persisted
+ *   locally. This is the only case where the wallet is unfunded and the
+ *   fund-and-poll UX is meaningful.
+ * - `selected`: the user picked an existing locally-saved agent that's
+ *   already active — nothing on disk or on-chain changed.
+ * - `switched`: the user changed the active agent to a different
+ *   locally-saved one (keystore mode). Wallet state is pre-existing.
+ *
+ * Only `created` should trigger the funding wait loop or the fund JSON
+ * action; the other two would emit a misleading "waiting for funds"
+ * prompt against a wallet that's already in use.
+ */
+type SetupOutcome =
+  | { kind: "created"; walletAddress: string }
+  | { kind: "selected"; walletAddress: string }
+  | { kind: "switched"; walletAddress: string };
+
 async function createAndActivateAgent(
-  sessionToken: string | null,
   agentName: string,
   useKeystore: boolean
-): Promise<boolean> {
+): Promise<SetupOutcome | null> {
   const trimmedName = agentName.trim();
   if (!trimmedName) {
     output.log("  No name entered. Skipping agent creation.\n");
-    return false;
+    return null;
   }
 
   if (!useKeystore) {
@@ -61,15 +74,24 @@ async function createAndActivateAgent(
       preflightEnvMode();
     } catch (e) {
       output.error(e instanceof Error ? e.message : String(e));
-      return false;
+      return null;
     }
   }
 
+  // Runs in both modes, before any remote registration, so a tracked
+  // .gitignore target can't orphan a server-side agent.
   try {
-    const result = await createAgentApi(sessionToken, trimmedName);
+    preflightStorage(ROOT);
+  } catch (e) {
+    output.error(e instanceof Error ? e.message : String(e));
+    return null;
+  }
+
+  try {
+    const result = await createAgentApi(trimmedName);
     if (!result?.apiKey) {
       output.error("Create agent failed — no API key returned.");
-      return false;
+      return null;
     }
     const storedWalletKey = await storeAgentKey({
       root: ROOT,
@@ -96,11 +118,6 @@ async function createAndActivateAgent(
       apiKey: result.apiKey,
       active: true,
     };
-
-    if (!newAgent.apiKey) {
-      output.error("Create agent failed — no API key returned.");
-      return false;
-    }
     updatedAgents.push(newAgent);
 
     writeConfig({
@@ -111,7 +128,7 @@ async function createAndActivateAgent(
 
     output.success(`Agent created: ${newAgent.name}`);
     output.log(`    Wallet:       ${newAgent.walletAddress}`);
-    output.log(`    API key:      ${redactApiKey(newAgent.apiKey)}`);
+    output.log(`    API key:      ${redactApiKey(result.apiKey)}`);
     if (storedWalletKey.mode === "keystore") {
       output.log(`    Keystore:     ${storedWalletKey.metadata.path}`);
       output.log(
@@ -123,38 +140,21 @@ async function createAndActivateAgent(
         "    AGENT_PRIVATE_KEY saved to .env (gitignored). Keep the file off version control and out of logs."
       );
     }
-    return true;
+    return { kind: "created", walletAddress: newAgent.walletAddress };
   } catch (e) {
     output.error(`Create agent failed: ${e instanceof Error ? e.message : String(e)}`);
-    return false;
+    return null;
   }
 }
 
 async function selectOrCreateAgent(
   rl: readline.Interface,
-  sessionToken: string | null,
   useKeystore: boolean
-): Promise<void> {
-  output.log("\n  Fetching your agents...\n");
-  let serverAgents: AgentInfoResponse[] = [];
-  if (sessionToken) {
-    try {
-      serverAgents = await fetchAgents(sessionToken);
-    } catch (e) {
-      output.warn(
-        `Could not fetch agents from server: ${e instanceof Error ? e.message : String(e)}`
-      );
-      output.log("  Using locally saved agents.\n");
-    }
-  } else {
-    output.log("  Browser session unavailable. Showing locally saved agents.\n");
-  }
-
-  const agents =
-    serverAgents.length > 0 ? syncAgentsToConfig(serverAgents) : (readConfig().agents ?? []);
+): Promise<SetupOutcome | null> {
+  const agents = readConfig().agents ?? [];
 
   if (agents.length > 0) {
-    output.log(`  You have ${agents.length} agent(s):\n`);
+    output.log(`  You have ${agents.length} agent(s) saved locally:\n`);
     for (let i = 0; i < agents.length; i++) {
       const a = agents[i];
       const marker = a.active ? output.colors.green(" (active)") : "";
@@ -173,32 +173,34 @@ async function selectOrCreateAgent(
         output.success(`Active agent: ${selected.name} (unchanged)`);
         output.log(`    Wallet:  ${selected.walletAddress}`);
         output.log(`    API Key: ${redactApiKey(selected.apiKey)}\n`);
-      } else {
-        if (!useKeystore) {
-          output.error(
-            "Switching agents in env mode would overwrite AGENT_PRIVATE_KEY and make " +
-              "the current agent unrecoverable. To activate this agent here, " +
-              "you'd need its original private key — easiest is to cd to its " +
-              "original directory. Alternatively, create a fresh keystore-mode " +
-              "agent with `yoso-agent setup --keystore` (clears the env block)."
-          );
-          return;
-        }
-        const proceed = await stopSellerIfRunning();
-        if (!proceed) {
-          output.log("  Setup cancelled.\n");
-          return;
-        }
-
-        try {
-          await switchAgent(selected.walletAddress);
-          output.success(`Active agent: ${selected.name}`);
-          output.log(`    Wallet:  ${selected.walletAddress}`);
-        } catch (e) {
-          output.error(`Failed to activate agent: ${e instanceof Error ? e.message : String(e)}`);
-        }
+        return { kind: "selected", walletAddress: selected.walletAddress };
       }
-      return;
+
+      if (!useKeystore) {
+        output.error(
+          "Switching agents in env mode would overwrite AGENT_PRIVATE_KEY and make " +
+            "the current agent unrecoverable. To activate this agent here, " +
+            "you'd need its original private key — easiest is to cd to its " +
+            "original directory. Alternatively, create a fresh keystore-mode " +
+            "agent with `yoso-agent setup --keystore` (clears the env block)."
+        );
+        return null;
+      }
+      const proceed = await stopSellerIfRunning();
+      if (!proceed) {
+        output.log("  Setup cancelled.\n");
+        return null;
+      }
+
+      try {
+        await switchAgent(selected.walletAddress);
+        output.success(`Active agent: ${selected.name}`);
+        output.log(`    Wallet:  ${selected.walletAddress}`);
+        return { kind: "switched", walletAddress: selected.walletAddress };
+      } catch (e) {
+        output.error(`Failed to activate agent: ${e instanceof Error ? e.message : String(e)}`);
+        return null;
+      }
     }
     // Fall through to create new agent
   }
@@ -206,17 +208,17 @@ async function selectOrCreateAgent(
   const proceed = await stopSellerIfRunning();
   if (!proceed) {
     output.log("  Setup cancelled.\n");
-    return;
+    return null;
   }
 
   output.log("  Create a new agent\n");
   const agentName = (await question(rl, "  Enter agent name: ")).trim();
   if (!agentName) {
     output.log("  No name entered. Skipping agent creation.\n");
-    return;
+    return null;
   }
 
-  await createAndActivateAgent(sessionToken, agentName, useKeystore);
+  return createAndActivateAgent(agentName, useKeystore);
 }
 
 export async function setup(options: SetupOptions = {}): Promise<void> {
@@ -234,10 +236,8 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
   try {
     output.heading("YOSO Agent Setup");
 
-    output.log("\n  Connect to the YOSO marketplace\n");
-    const sessionToken = await ensureSessionIfAvailable();
-
-    output.log("  Select or create agent\n");
+    output.log("\n  Select or create agent\n");
+    let outcome: SetupOutcome | null = null;
     if (options.agentName) {
       const proceed = await stopSellerIfRunning();
       if (!proceed) {
@@ -245,36 +245,56 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
         return;
       }
       output.log("  Create a new agent\n");
-      await createAndActivateAgent(sessionToken, options.agentName, useKeystore);
+      outcome = await createAndActivateAgent(options.agentName, useKeystore);
     } else if (rl) {
-      await selectOrCreateAgent(rl, sessionToken, useKeystore);
+      outcome = await selectOrCreateAgent(rl, useKeystore);
     }
 
     const config = readConfig();
     if (!config.YOSO_AGENT_API_KEY) {
-      output.log(
-        "  No active agent. Run setup again or create one with:\n    yoso-agent agent create <agent-name>\n"
+      // Setup did not leave an active agent. Exit non-zero so AI assistants
+      // and CI don't proceed to `sell init` / `serve start` thinking setup
+      // succeeded. Previously setup printed "Setup complete" and returned
+      // exit 0 even when registration failed — misleading.
+      output.fatal(
+        "Setup did not complete successfully: no active agent is configured. " +
+          "Review the error(s) above (typically a server register 4xx, a rate limit, " +
+          "or a missing/incorrect YOSO_CANONICAL_AUDIENCE env var) and re-run " +
+          "`yoso-agent setup --name <name> --yes`."
       );
-    } else {
-      let tokenAddress: string | null = null;
-      let tokenSymbol: string | null = null;
-      try {
-        const { getMyAgentInfo } = await import("../lib/wallet.js");
-        const info = await getMyAgentInfo();
-        tokenAddress = info.tokenAddress ?? null;
-        tokenSymbol = info.token?.symbol ?? null;
-      } catch (e) {
-        output.warn(`Could not fetch token status: ${e instanceof Error ? e.message : String(e)}`);
-      }
+    }
 
-      if (tokenAddress) {
-        output.log("  Agent token\n");
-        output.success(`Token already launched${tokenSymbol ? ` (${tokenSymbol})` : ""}.`);
-        output.field("    Token Address", tokenAddress);
-        output.log("\n  Run `yoso-agent profile show` for more details.\n");
-      } else {
-        output.log("  Agent token launch is unavailable from this CLI.\n");
-      }
+    // Fund-and-poll ONLY for freshly created agents. Selected or switched agents
+    // already have wallet state (funded or not) from a prior session; printing a
+    // "waiting for funds" prompt against them would be misleading and, in
+    // automation contexts, block unnecessarily on an unfunded scenario that was
+    // already handled. TTY + JSON gating remains as before.
+    const isFreshlyCreated = outcome?.kind === "created";
+    const shouldPollFunds =
+      isFreshlyCreated &&
+      !options.skipFundPoll &&
+      !output.isJsonMode() &&
+      process.stdout.isTTY === true;
+
+    if (shouldPollFunds && outcome) {
+      await promptFundAndPoll(outcome.walletAddress);
+    } else if (isFreshlyCreated && outcome && output.isJsonMode()) {
+      output.json({
+        action: "fund",
+        walletAddress: outcome.walletAddress,
+        thresholds: { hype: "0.01", usdc: "0.25" },
+        notes: "Send 0.02 HYPE + $1 USDC on HyperEVM (chain 999) to begin serving.",
+      });
+    } else if (isFreshlyCreated && outcome) {
+      // Non-TTY, non-JSON — just print instructions once and exit.
+      output.log("");
+      output.log("  Fund your agent to go live:");
+      output.log(`    Address: ${outcome.walletAddress}`);
+      output.log(
+        "    Send:    0.02 HYPE (gas) + $1 USDC (working capital) on HyperEVM (chain 999)"
+      );
+      output.log("    USDC:    0xb88339CB7199b77E23DB6E890353E22632Ba630f");
+      output.log("");
     }
 
     if (config.YOSO_AGENT_API_KEY) {
@@ -321,6 +341,7 @@ I have access to the YOSO Agent Marketplace. I can hire specialised agents for t
       }
     }
 
+    // Reached only when a valid agent is configured (bail above on failure).
     output.success("Setup complete. Run `yoso-agent --help` to see available commands.\n");
   } finally {
     rl?.close();

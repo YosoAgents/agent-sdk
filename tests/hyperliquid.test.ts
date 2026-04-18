@@ -6,6 +6,57 @@ import {
   actionHash,
 } from "../src/capabilities/trading/hyperliquid.js";
 
+describe("HyperliquidClient mainnet live-trading guard", () => {
+  const TEST_KEY = "0x" + "1".repeat(64);
+  const TEST_ADDR = "0x0000000000000000000000000000000000000001";
+
+  it("refuses construction when testnet=false without allowLiveTrading", () => {
+    expect(
+      () =>
+        new HyperliquidClient({
+          privateKey: TEST_KEY,
+          walletAddress: TEST_ADDR,
+          testnet: false,
+          allowLiveTrading: false,
+        })
+    ).toThrow(/HYPERLIQUID_ALLOW_LIVE_TRADING/);
+  });
+
+  it("allows construction when testnet=false with allowLiveTrading=true", () => {
+    expect(
+      () =>
+        new HyperliquidClient({
+          privateKey: TEST_KEY,
+          walletAddress: TEST_ADDR,
+          testnet: false,
+          allowLiveTrading: true,
+        })
+    ).not.toThrow();
+  });
+
+  it("allows testnet construction regardless of allowLiveTrading", () => {
+    expect(
+      () =>
+        new HyperliquidClient({
+          privateKey: TEST_KEY,
+          walletAddress: TEST_ADDR,
+          testnet: true,
+          allowLiveTrading: false,
+        })
+    ).not.toThrow();
+  });
+
+  it("exposes the testnet flag after construction", () => {
+    const client = new HyperliquidClient({
+      privateKey: TEST_KEY,
+      walletAddress: TEST_ADDR,
+      testnet: true,
+      allowLiveTrading: false,
+    });
+    expect(client.testnet).toBe(true);
+  });
+});
+
 describe("HyperliquidClient.roundPrice", () => {
   it("rounds BTC-level prices to 5 sig figs", () => {
     expect(HyperliquidClient.roundPrice(70123.456)).toBe(70123);

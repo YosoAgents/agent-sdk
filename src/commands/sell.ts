@@ -315,7 +315,7 @@ export async function init(offeringName: string): Promise<void> {
     description: "",
     jobFee: null,
     jobFeeType: null,
-    requiredFunds: null,
+    requiredFunds: false,
     requirement: {},
   };
 

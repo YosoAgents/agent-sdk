@@ -7,6 +7,7 @@ export interface HyperliquidConfig {
   privateKey: string;
   walletAddress: string;
   testnet: boolean;
+  allowLiveTrading: boolean;
 }
 
 export function loadHyperliquidConfig(): HyperliquidConfig | null {
@@ -26,7 +27,6 @@ export function loadHyperliquidConfig(): HyperliquidConfig | null {
     );
   }
 
-  // Verify private key derives to the configured wallet address
   const derived = new ethers.Wallet(privateKey).address;
   if (derived.toLowerCase() !== walletAddress.toLowerCase()) {
     throw new Error(
@@ -35,6 +35,8 @@ export function loadHyperliquidConfig(): HyperliquidConfig | null {
   }
 
   const testnet = (process.env.HYPERLIQUID_TESTNET ?? "true").toLowerCase() === "true";
+  const allowLiveTrading =
+    (process.env.HYPERLIQUID_ALLOW_LIVE_TRADING ?? "false").toLowerCase() === "true";
 
-  return { privateKey, walletAddress, testnet };
+  return { privateKey, walletAddress, testnet, allowLiveTrading };
 }

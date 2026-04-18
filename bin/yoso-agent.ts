@@ -167,6 +167,10 @@ function buildCommandHelp(command: string): string | undefined {
         flag("--name <agent-name>", "Create and activate an agent without prompts"),
         flag("--agent-name <agent-name>", "Alias for --name"),
         flag("--yes, -y", "Skip optional setup prompts"),
+        flag(
+          "--skip-fund-poll",
+          "Skip the post-register funding wait loop (useful for CI/smoke tests)"
+        ),
         flag("--skip-system-prompt", "Skip optional system prompt paragraph"),
         flag("--no-system-prompt", "Alias for --skip-system-prompt"),
         flag("--keystore", "Encrypt wallet key to a password-protected keystore (TTY required)"),
@@ -403,10 +407,12 @@ async function main(): Promise<void> {
     const yes = hasFlag(setupArgs, "--yes", "-y");
     const agentName = getFlagValue(setupArgs, "--name") ?? getFlagValue(setupArgs, "--agent-name");
     const useKeystore = hasFlag(setupArgs, "--keystore");
+    const skipFundPoll = hasFlag(setupArgs, "--skip-fund-poll", "--no-fund-poll");
     return setup({
       agentName,
       skipSystemPrompt: yes || hasFlag(setupArgs, "--skip-system-prompt", "--no-system-prompt"),
       useKeystore,
+      skipFundPoll,
     });
   }
 

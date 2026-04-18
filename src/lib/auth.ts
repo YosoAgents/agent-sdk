@@ -1,43 +1,26 @@
-import axios, { type AxiosInstance } from "axios";
-import http from "http";
-import https from "https";
+import { Wallet } from "ethers";
+import { randomUUID } from "node:crypto";
 import * as output from "./output.js";
-import { openUrl } from "./open.js";
 import { readConfig, writeConfig, type AgentEntry } from "./config.js";
 import client from "./client.js";
-import { isSessionTokenLocallyFresh } from "./session-token.js";
 
-function authBaseUrl(): string {
-  if (process.env.YOSO_AUTH_URL?.trim()) {
-    return process.env.YOSO_AUTH_URL.trim().replace(/\/$/, "");
-  }
+/**
+ * v0.3.0 register flow:
+ *   - Wallet generated client-side. Server never sees the private key.
+ *   - SDK signs a canonical EIP-191 message proving ownership of the claimed address.
+ *   - Server atomically claims the nonce (Redis SET NX EX) and verifies the sig.
+ *   - Response includes only `{agent, apiKey}`. The SDK keeps the private key locally.
+ *
+ * The previous session-based browser-auth flow (`/api/auth/lite/*`, `/api/agents/lite`)
+ * was never implemented server-side. Those code paths are removed in 0.3.0.
+ */
 
-  if (process.env.YOSO_API_URL?.trim()) {
-    return process.env.YOSO_API_URL.trim()
-      .replace(/\/api\/?$/, "")
-      .replace(/\/$/, "");
-  }
-
-  return "https://yoso.bet";
-}
-
-export interface AuthUrlResponse {
-  authUrl: string;
-  requestId: string;
-}
-
-export interface AuthStatusResponse {
-  token: string;
-}
-
-/** Returned by list agents - no API key (never exposed after creation). */
 export interface AgentInfoResponse {
   id: string;
   name: string;
   walletAddress: string;
 }
 
-/** Returned by create agent - API key + wallet private key shown once. */
 export interface AgentKeyResponse {
   id: string;
   name: string;
@@ -46,71 +29,23 @@ export interface AgentKeyResponse {
   walletPrivateKey: string;
 }
 
-/** Returned by regenerate - fresh API key for an existing agent. */
 export interface RegenerateKeyResponse {
   apiKey: string;
 }
 
-function createAuthClient(sessionToken?: string | null): AxiosInstance {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (sessionToken) {
-    headers.Authorization = `Bearer ${sessionToken}`;
-  }
-
-  return axios.create({
-    baseURL: authBaseUrl(),
-    headers,
-    proxy: false,
-    httpAgent: new http.Agent({ family: 4 }),
-    httpsAgent: new https.Agent({ family: 4 }),
-  });
+function canonicalAudience(): string {
+  return (process.env.YOSO_CANONICAL_AUDIENCE ?? "yoso.bet").trim();
 }
 
-export function getValidSessionToken(): string | null {
-  const config = readConfig();
-  const token = config?.SESSION_TOKEN?.token;
-  if (!token) return null;
-
-  return isSessionTokenLocallyFresh(token) ? token : null;
-}
-
-function storeSessionToken(token: string): void {
-  const config = readConfig();
-  writeConfig({ ...config, SESSION_TOKEN: { token } });
-}
-
-async function getAuthUrl(): Promise<AuthUrlResponse> {
-  const { data } = await createAuthClient().get<{ data: AuthUrlResponse }>(
-    "/api/auth/lite/auth-url"
-  );
-  return data.data;
-}
-
-async function getAuthStatus(requestId: string): Promise<AuthStatusResponse | null> {
-  const { data } = await createAuthClient().get<{ data: AuthStatusResponse }>(
-    `/api/auth/lite/auth-status?requestId=${requestId}`
-  );
-  return data?.data ?? null;
-}
-
-/** Fetch all agents belonging to the authenticated user. No API keys returned. */
-export async function fetchAgents(sessionToken: string): Promise<AgentInfoResponse[]> {
-  const { data } = await createAuthClient(sessionToken).get<{
-    data: AgentInfoResponse[];
-  }>("/api/agents/lite");
-  return data.data;
-}
-
-interface CreateAgentApiResponse {
-  agent?: {
-    id?: unknown;
-    name?: unknown;
-    walletAddress?: unknown;
-  };
-  apiKey?: unknown;
-  walletPrivateKey?: unknown;
+function buildCanonicalMessage(walletAddressLower: string, nonce: string, iat: string): string {
+  return [
+    "yoso agent registration",
+    `audience: ${canonicalAudience()}`,
+    `chainId: 999`,
+    `address: ${walletAddressLower}`,
+    `nonce: ${nonce}`,
+    `iat: ${iat}`,
+  ].join("\n");
 }
 
 function requireString(value: unknown, field: string): string {
@@ -120,29 +55,69 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
-/** Create a new agent for the authenticated user. API key + wallet private key returned once. */
-export async function createAgentApi(
-  sessionToken: string | null,
-  agentName: string
-): Promise<AgentKeyResponse> {
-  const { data } = await createAuthClient(sessionToken).post<CreateAgentApiResponse>(
-    "/api/agents/register",
-    { name: agentName.trim() }
-  );
-  const agent = data.agent;
+interface CreateAgentApiResponse {
+  agent?: {
+    id?: unknown;
+    name?: unknown;
+    walletAddress?: unknown;
+  };
+  apiKey?: unknown;
+  // Defense: reject responses that still carry this legacy field.
+  walletPrivateKey?: unknown;
+}
+
+/**
+ * Create a new agent. SDK 0.3.0+ generates the wallet locally, signs the canonical
+ * registration message, and posts only the public address + signature to the server.
+ */
+export async function createAgentApi(agentName: string): Promise<AgentKeyResponse> {
+  const trimmedName = agentName.trim();
+  if (!trimmedName) {
+    throw new Error("Agent name must be a non-empty string.");
+  }
+
+  const wallet = Wallet.createRandom();
+  const walletAddress = wallet.address.toLowerCase();
+  const nonce = randomUUID();
+  const iat = new Date().toISOString();
+  const message = buildCanonicalMessage(walletAddress, nonce, iat);
+  const signature = await wallet.signMessage(message);
+
+  const { data } = await client.post<CreateAgentApiResponse>("/agents/register", {
+    name: trimmedName,
+    walletAddress,
+    message,
+    signature,
+  });
+
+  // Split-brain defense: server MUST echo the address we claimed.
+  const serverWallet = (data.agent?.walletAddress ?? "") as string;
+  if (typeof serverWallet !== "string" || serverWallet.toLowerCase() !== walletAddress) {
+    throw new Error(
+      `Server returned wallet ${serverWallet || "(missing)"}, expected ${walletAddress}. ` +
+        `Likely an SDK/server version mismatch — upgrade both or contact support.`
+    );
+  }
+
+  // Legacy response-shape defense: a 0.2.x-era backend shouldn't echo walletPrivateKey
+  // back to us any more. If it does, refuse to continue — something is very wrong.
+  if (data.walletPrivateKey !== undefined) {
+    throw new Error(
+      "Server returned a walletPrivateKey, which is forbidden in the new flow. " +
+        "Refusing to continue — server is on an old/legacy code path."
+    );
+  }
+
   return {
-    id: requireString(agent?.id, "agent.id"),
-    name: requireString(agent?.name, "agent.name"),
-    walletAddress: requireString(agent?.walletAddress, "agent.walletAddress"),
+    id: requireString(data.agent?.id, "agent.id"),
+    name: requireString(data.agent?.name, "agent.name"),
+    walletAddress,
     apiKey: requireString(data.apiKey, "apiKey"),
-    walletPrivateKey: requireString(data.walletPrivateKey, "walletPrivateKey"),
+    walletPrivateKey: wallet.privateKey,
   };
 }
 
-export async function regenerateApiKey(
-  _sessionToken: string | null,
-  walletAddress: string
-): Promise<RegenerateKeyResponse> {
+export async function regenerateApiKey(walletAddress: string): Promise<RegenerateKeyResponse> {
   const config = readConfig();
   const agentKey = config.agents?.find(
     (a) => a.walletAddress.toLowerCase() === walletAddress.toLowerCase()
@@ -152,11 +127,11 @@ export async function regenerateApiKey(
     throw new Error("No saved API key for this agent. Re-run setup or create a new agent.");
   }
 
-  const { data } = await createAuthClient().post<{
+  const { data } = await client.post<{
     data?: RegenerateKeyResponse;
     apiKey?: string;
   }>(
-    "/api/agents/register/regenerate",
+    "/agents/register/regenerate",
     {},
     {
       headers: {
@@ -182,133 +157,47 @@ export async function isAgentApiKeyValid(apiKey: string): Promise<boolean> {
     .catch(() => false);
 }
 
-/** How often to poll the auth status endpoint (ms). */
-const AUTH_POLL_INTERVAL_MS = 5_000;
-
-/** How long to wait for the user to authenticate before timing out (ms). */
-const AUTH_TIMEOUT_MS = 5 * 60 * 1_000;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function pollForSessionToken(requestId: string): Promise<string | null> {
-  const deadline = Date.now() + AUTH_TIMEOUT_MS;
-  let elapsed = 0;
-
-  while (Date.now() < deadline) {
-    await sleep(AUTH_POLL_INTERVAL_MS);
-    elapsed += AUTH_POLL_INTERVAL_MS;
-
-    let status: AuthStatusResponse | null = null;
-    try {
-      status = await getAuthStatus(requestId);
-    } catch {
-      // Auth not ready yet or transient error - keep polling
-    }
-    if (status?.token) {
-      storeSessionToken(status.token);
-      return status.token;
-    }
-
-    // Progress indicator every 15s (3 polls)
-    if (elapsed % 15_000 === 0) {
-      const remaining = Math.round((deadline - Date.now()) / 1_000);
-      output.log(`  Still waiting... (${remaining}s remaining)`);
-    }
-  }
-
-  return null;
-}
-
-async function openAuthRequest(): Promise<AuthUrlResponse> {
-  const auth = await getAuthUrl();
-  const { authUrl, requestId } = auth;
-  openUrl(authUrl);
-
-  output.output(
-    {
-      action: "open_url",
-      url: authUrl,
-      message: "Authenticate at this URL to continue.",
-    },
-    () => {
-      output.log(`  Opening browser...`);
-      output.log(`  Login link: ${authUrl}\n`);
-      output.log(`  Waiting for authentication (timeout: ${AUTH_TIMEOUT_MS / 1_000}s)...\n`);
-    }
-  );
-
-  return { authUrl, requestId };
+/**
+ * Session-based agent list was served by `/api/agents/lite`, an endpoint that was never
+ * implemented server-side. In 0.3.0 the SDK is key-based only — no session tokens.
+ *
+ * Kept as a graceful no-op so `agent list` / `setup` don't crash. Local `config.agents`
+ * is authoritative until the server exposes a key-based equivalent in a future release.
+ */
+export async function fetchAgents(): Promise<AgentInfoResponse[]> {
+  return [];
 }
 
 /**
- * Login flow. Opens browser / prints link, then polls until authenticated
- * or timed out. No stdin interaction required - works in any runtime.
+ * No-op kept for backward compatibility with `yoso-agent login`. The browser auth
+ * endpoints were never implemented. Users should run `yoso-agent setup` instead.
  */
 export async function interactiveLogin(): Promise<void> {
-  let auth: AuthUrlResponse;
-  try {
-    auth = await openAuthRequest();
-  } catch (e) {
-    output.fatal(`Could not get login link: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  const token = await pollForSessionToken(auth.requestId);
-  if (!token) {
-    output.fatal(
-      `Authentication timed out after ${AUTH_TIMEOUT_MS / 1_000}s. Run \`yoso-agent login\` to try again.`
-    );
-  }
-
-  output.output(
-    {
-      status: "authenticated",
-      message: "Login success. Session stored.",
-    },
-    () => output.success("Login success. Session stored.\n")
-  );
+  output.log("  `yoso-agent login` is a no-op in 0.3.0.");
+  output.log("  Browser-based auth is not available; the SDK is key-based.\n");
+  output.log("  Run `yoso-agent setup --name <name> --yes` to create a new agent.\n");
 }
 
-/** Start browser auth when available; return null when setup can continue without it. */
-export async function ensureSessionIfAvailable(): Promise<string | null> {
-  const existing = getValidSessionToken();
-  if (existing) return existing;
-
-  let auth: AuthUrlResponse;
-  try {
-    auth = await openAuthRequest();
-  } catch (e) {
-    output.warn(
-      `Browser login is unavailable (${e instanceof Error ? e.message : String(e)}). ` +
-        "Continuing with direct agent registration.\n"
-    );
-    return null;
-  }
-
-  const token = await pollForSessionToken(auth.requestId);
-  if (token) {
-    output.output(
-      {
-        status: "authenticated",
-        message: "Login success. Session stored.",
-      },
-      () => output.success("Login success. Session stored.\n")
-    );
-    return token;
-  }
-
-  output.warn("Authentication timed out. Continuing with direct agent registration.\n");
+/**
+ * Always returns null in 0.3.0 (no session tokens). Callers fall back to local
+ * config and direct key-based API calls.
+ */
+export function getValidSessionToken(): null {
   return null;
 }
 
 /**
  * Merge server agents into local config. Returns the merged list.
- * Server does NOT return API keys - only id, name, walletAddress.
- * Local API keys (from create/regenerate) are preserved.
+ * In 0.3.0 `fetchAgents` always returns [], so this is effectively a pass-through
+ * of local config. Kept to minimize churn in callers until 0.4.0.
  */
 export function syncAgentsToConfig(serverAgents: AgentInfoResponse[]): AgentEntry[] {
   const config = readConfig();
   const localAgents = config.agents ?? [];
+
+  if (serverAgents.length === 0) {
+    return localAgents;
+  }
 
   const localMap = new Map<string, AgentEntry>();
   for (const a of localAgents) {
@@ -321,7 +210,7 @@ export function syncAgentsToConfig(serverAgents: AgentInfoResponse[]): AgentEntr
       id: s.id,
       name: s.name,
       walletAddress: s.walletAddress,
-      apiKey: local?.apiKey, // preserve local key if we have one
+      apiKey: local?.apiKey,
       active: local?.active ?? false,
     };
   });

@@ -38,10 +38,7 @@ export function checkSecretFile(root: string, relPath: string): SecretFileStatus
   return { isGitRepo: true, isTracked, isIgnored };
 }
 
-/**
- * Refuses to proceed if a secret-bearing file is tracked by git. No-op outside git.
- * Throws with actionable remediation instructions.
- */
+/** Throws if any path is tracked by git. No-op outside git. */
 export function assertSecretsNotTracked(root: string, relPaths: string[]): void {
   if (!isGitRepo(root)) return;
   const tracked = relPaths.filter((rel) => runGit(root, ["ls-files", "--error-unmatch", rel]).ok);
@@ -53,14 +50,8 @@ export function assertSecretsNotTracked(root: string, relPaths: string[]): void 
   );
 }
 
-/**
- * Ensure entries are effectively ignored at `root`. No-op outside git.
- *
- * - Creates .gitignore if absent.
- * - Appends entries that aren't already ignored.
- * - Refuses if an entry is explicitly un-ignored (e.g. `!.env`) — caller must fix manually.
- * - Verifies with `git check-ignore` after appending and fails if still not ignored.
- */
+/** Ensure entries are ignored at `root` (no-op outside git). Creates/appends `.gitignore`,
+ *  refuses active negations (`!.env`), verifies with `check-ignore` after writing. */
 export function ensureGitignored(root: string, entries: string[]): void {
   if (!isGitRepo(root)) return;
 
