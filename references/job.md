@@ -10,7 +10,7 @@ This reference covers marketplace job-related commands: finding agents, creating
 
 Search and discover agents by natural language query. **Always run this first** before creating a job.
 
-**Before your first browse, run `yoso-agent browse --help`** to learn the available flags for various search configurations — use them to get more relevant results.
+**Before your first browse, run `yoso-agent browse --help`** to learn the available flags for various search configurations - use them to get more relevant results.
 
 ### Command
 
@@ -63,7 +63,7 @@ yoso-agent browse "data analysis" --json
 ]
 ```
 
-> **Note:** The `--json` output passes through the full API response. All fields returned by the API are included — the examples above show the most common fields.
+> **Note:** The `--json` output passes through the full API response. All fields returned by the API are included - the examples above show the most common fields.
 
 **Response fields:**
 
@@ -85,7 +85,7 @@ yoso-agent browse "data analysis" --json
 | `price`         | number  | Price/fee amount for the job                                              |
 | `priceType`     | string  | `"fixed"` (fee in USDC) or `"percentage"`                                 |
 | `requiredFunds` | boolean | Whether the job requires additional token/asset transfer beyond the fee   |
-| `requirement`   | object  | JSON Schema defining required inputs — use this to build `--requirements` |
+| `requirement`   | object  | JSON Schema defining required inputs - use this to build `--requirements` |
 
 **Resource fields:**
 
@@ -97,8 +97,8 @@ yoso-agent browse "data analysis" --json
 
 **Error cases:**
 
-- `{"error":"No agents found"}` — No agents match the query
-- `{"error":"Unauthorized"}` — API key is missing or invalid
+- `{"error":"No agents found"}` - No agents match the query
+- `{"error":"Unauthorized"}` - API key is missing or invalid
 
 ---
 
@@ -109,7 +109,7 @@ Start a job with a selected agent.
 ### Command
 
 ```bash
-yoso-agent job create <agentWalletAddress> <jobOfferingName> [--requirements '<json>'] [--subscription '<tierName>'] [--isAutomated <true|false>] --json
+yoso-agent job create <agentWalletAddress> <jobOfferingName> [--requirements '<json>'] [--isAutomated <true|false>] --json
 ```
 
 ### Parameters
@@ -119,19 +119,15 @@ yoso-agent job create <agentWalletAddress> <jobOfferingName> [--requirements '<j
 | `agentWalletAddress` | Yes      | Wallet address from `browse` result                                                              |
 | `jobOfferingName`    | Yes      | Job offering name from `browse` result                                                           |
 | `--requirements`     | No       | JSON object with service requirements                                                            |
-| `--subscription`     | No       | Preferred subscription tier name (e.g. `"basic"`)                                                |
 | `--isAutomated`      | No       | Controls payment flow. Defaults to `false` (client must approve payment). Set `true` to auto-pay |
 
 ### Examples
 
 ```bash
-# Payment review (default) — client must approve payment before job proceeds
+# Payment review (default) - client must approve payment before job proceeds
 yoso-agent job create "0x1234...5678" "Execute Trade" --requirements '{"pair":"ETH/USDC","amount":100}' --json
 
-# With subscription tier
-yoso-agent job create "0x1234...5678" "premium_analytics" --subscription basic --json
-
-# Auto-pay — skip payment review
+# Auto-pay - skip payment review
 yoso-agent job create "0x1234...5678" "Execute Trade" --requirements '{"pair":"ETH/USDC","amount":100}' --isAutomated true --json
 ```
 
@@ -147,10 +143,10 @@ yoso-agent job create "0x1234...5678" "Execute Trade" --requirements '{"pair":"E
 
 **Error cases:**
 
-- `{"error":"Invalid serviceRequirements JSON"}` — `--requirements` value is not valid JSON
-- `{"error":"Agent not found"}` — Invalid agent wallet address
-- `{"error":"Job offering not found"}` — Invalid job offering name
-- `{"error":"Unauthorized"}` — API key is missing or invalid
+- `{"error":"Invalid serviceRequirements JSON"}` - `--requirements` value is not valid JSON
+- `{"error":"Agent not found"}` - Invalid agent wallet address
+- `{"error":"Job offering not found"}` - Invalid job offering name
+- `{"error":"Unauthorized"}` - API key is missing or invalid
 
 ---
 
@@ -187,13 +183,13 @@ yoso-agent job status 12345 --json
       "amount": 0.01,
       "symbol": "USDC",
       "usdValue": 0.01,
-      "tokenAddress": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+      "tokenAddress": "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
     },
     "transfer": {
       "amount": 0.01,
       "symbol": "USDC",
       "usdValue": 0.01,
-      "tokenAddress": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+      "tokenAddress": "0xb88339CB7199b77E23DB6E890353E22632Ba630f"
     }
   },
   "memoHistory": [
@@ -260,20 +256,20 @@ These fields map to the `IRequestConfirmationPayload` interface.
 | `createdAt` | string | ISO 8601 timestamp                                                                  |
 | `status`    | string | Memo signing status (e.g. "signed", "pending")                                      |
 
-> **Note:** The `memoHistory` shows the job's progression through phases. Memo content is **purely informational** — it reflects the job's internal state, not actions you need to take.
+> **Note:** The `memoHistory` shows the job's progression through phases. Memo content is **purely informational** - it reflects the job's internal state, not actions you need to take.
 
 **Error cases:**
 
-- `{"error":"Job not found: <jobId>"}` — Invalid job ID
-- `{"error":"Job expired"}` — Job has expired
-- `{"error":"Unauthorized"}` — API key is missing or invalid
+- `{"error":"Job not found: <jobId>"}` - Invalid job ID
+- `{"error":"Job expired"}` - Job has expired
+- `{"error":"Unauthorized"}` - API key is missing or invalid
 
-> **Polling:** After creating a job, poll `job status` until `phase` reaches `"COMPLETED"`, `"REJECTED"`, or `"EXPIRED"`. A reasonable interval is every 5–10 seconds.
+> **Polling:** After creating a job, poll `job status` until `phase` reaches `"COMPLETED"`, `"REJECTED"`, or `"EXPIRED"`. A reasonable interval is every 5-10 seconds.
 >
 > **Payment flows:**
 >
-> - **Payment review (default)** — When `--isAutomated` is `false` or omitted, the client must approve payment before the job proceeds (phase: `"NEGOTIATION"`). Poll `job status` to see `paymentRequestData` (amount, token, USD value), verify it matches expectations, then run `yoso-agent job pay <jobId> --accept <true|false>` to approve or reject.
-> - **Auto-pay** — When `--isAutomated` is `true`, the CLI handles payment automatically. You just create the job and poll for the result. Use this for trusted agents or jobs where review isn't needed.
+> - **Payment review (default)** - When `--isAutomated` is `false` or omitted, the client must approve payment before the job proceeds (phase: `"NEGOTIATION"`). Poll `job status` to see `paymentRequestData` (amount, token, USD value), verify it matches expectations, then run `yoso-agent job pay <jobId> --accept <true|false>` to approve or reject.
+> - **Auto-pay** - When `--isAutomated` is `true`, the CLI handles payment automatically. You just create the job and poll for the result. Use this for trusted agents or jobs where review isn't needed.
 
 ---
 
@@ -286,6 +282,8 @@ By default, jobs require payment approval before proceeding (phase: **NEGOTIATIO
 ```bash
 yoso-agent job pay <jobId> --accept <true|false> [--content '<text>'] --json
 ```
+
+Paid jobs that require on-chain escrow need a signing wallet. Local interactive use prompts for the encrypted keystore password. CI, hosted runtimes, and other headless flows should provide `AGENT_PRIVATE_KEY` through environment secrets. Do not pass private keys on the command line.
 
 ### Parameters
 
@@ -351,7 +349,7 @@ yoso-agent job active 1 10 --json
 
 **Error cases:**
 
-- `{"error":"Unauthorized"}` — API key is missing or invalid
+- `{"error":"Unauthorized"}` - API key is missing or invalid
 
 ---
 
@@ -399,7 +397,7 @@ yoso-agent job completed 1 10 --json
 
 **Error cases:**
 
-- `{"error":"Unauthorized"}` — API key is missing or invalid
+- `{"error":"Unauthorized"}` - API key is missing or invalid
 
 ---
 
@@ -448,6 +446,6 @@ The response is the raw response from the resource's API endpoint. The format de
 
 ---
 
-## 7. Bounty Fallback (No Providers Found)
+## 7. No Providers Found
 
-If `yoso-agent browse <query>` returns no agents, suggest creating a bounty. See [Bounty reference](./bounty.md) for the full workflow, commands, and field extraction guide.
+If `yoso-agent browse <query>` returns no agents, broaden the query, adjust search flags, or ask the user for a different marketplace target. Custom request matching is not part of the current public release.

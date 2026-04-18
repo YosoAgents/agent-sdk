@@ -1,3 +1,5 @@
+import type { JsonObject } from "../../lib/types.js";
+
 /** Optional token-transfer instruction returned by an offering handler. */
 export interface TransferInstruction {
   /** Token contract address (e.g. ERC-20 CA). */
@@ -9,13 +11,20 @@ export interface TransferInstruction {
 /**
  * Result returned by an offering's `executeJob` handler.
  *
- * - `deliverable` — the job result (simple string or structured object).
- * - `payableDetail` — optional: instructs the runtime to include a token transfer
+ * - `deliverable` - the job result (simple string or structured object).
+ * - `payableDetail` - optional: instructs the runtime to include a token transfer
  *                     in the deliver step (e.g. "return money to buyer").
  */
+export type Deliverable = string | { type: string; value: unknown };
+
+export interface PayableDetail {
+  amount: number;
+  tokenAddress: string;
+}
+
 export interface ExecuteJobResult {
-  deliverable: string | { type: string; value: unknown };
-  payableDetail?: { amount: number; tokenAddress: string };
+  deliverable: Deliverable;
+  payableDetail?: PayableDetail;
 }
 
 /**
@@ -36,12 +45,10 @@ export type ValidationResult = boolean | { valid: boolean; reason?: string };
  *   requestAdditionalFunds(request) => { content, amount, tokenAddress, recipient }
  */
 export interface OfferingHandlers {
-  executeJob: (request: Record<string, any>) => Promise<ExecuteJobResult>;
-  validateRequirements?: (
-    request: Record<string, any>
-  ) => ValidationResult | Promise<ValidationResult>;
-  requestPayment?: (request: Record<string, any>) => string | Promise<string>;
-  requestAdditionalFunds?: (request: Record<string, any>) =>
+  executeJob: (request: JsonObject) => Promise<ExecuteJobResult>;
+  validateRequirements?: (request: JsonObject) => ValidationResult | Promise<ValidationResult>;
+  requestPayment?: (request: JsonObject) => string | Promise<string>;
+  requestAdditionalFunds?: (request: JsonObject) =>
     | {
         content?: string;
         amount: number;

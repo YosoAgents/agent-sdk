@@ -1,6 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { HyperliquidClient } from "../../capabilities/trading/hyperliquid.js";
+import {
+  HYPERLIQUID_ORDER_TYPES,
+  type HyperliquidClient,
+} from "../../capabilities/trading/hyperliquid.js";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -25,7 +28,7 @@ export function registerTradingTools(server: McpServer, client: HyperliquidClien
       size_usd: z.number().positive().max(100_000).describe("Order size in USD (max 100k)"),
       price: z.number().positive().optional().describe("Limit price (omit for market order)"),
       order_type: z
-        .enum(["limit", "market", "alo"])
+        .enum(HYPERLIQUID_ORDER_TYPES)
         .optional()
         .default("limit")
         .describe("Order type"),
@@ -37,28 +40,33 @@ export function registerTradingTools(server: McpServer, client: HyperliquidClien
       if (!client) return err(NOT_CONFIGURED);
       try {
         const isBuy = params.side === "buy";
-        // Bracket order if TP or SL provided
+        const orderType = params.order_type ?? "limit";
         if (params.tp_price || params.sl_price) {
-          const entryPrice = params.price ?? (await client.getMidPrice(params.coin));
+          if (orderType !== "market" && params.price === undefined) {
+            return err("price is required for limit, ALO, and bracket entry orders");
+          }
+          const entryPrice =
+            params.price ?? (orderType === "market" ? await client.getMidPrice(params.coin) : null);
           if (!entryPrice) return err(`No price available for ${params.coin}`);
           const result = await client.placeBracketOrder({
             coin: params.coin,
             isBuy,
             sizeUsd: params.size_usd,
             entryPrice,
-            entryType: params.order_type ?? "limit",
+            entryType: orderType,
             tpPrice: params.tp_price,
             slPrice: params.sl_price,
           });
           return ok(result);
         }
-        // Market order
-        if (!params.price || params.order_type === "market") {
+        if (orderType === "market") {
           const result = await client.placeMarketOrder(params.coin, isBuy, params.size_usd);
           return ok(result);
         }
-        // ALO order
-        if (params.order_type === "alo") {
+        if (params.price === undefined) {
+          return err("price is required for limit and ALO orders");
+        }
+        if (orderType === "alo") {
           const result = await client.placePostOnlyOrder(
             params.coin,
             isBuy,
@@ -68,7 +76,6 @@ export function registerTradingTools(server: McpServer, client: HyperliquidClien
           );
           return ok(result);
         }
-        // Limit order (default)
         const result = await client.placeLimitOrder(
           params.coin,
           isBuy,

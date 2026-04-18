@@ -1,7 +1,7 @@
 #!/usr/bin/env npx tsx
 
 import { connectSellerSocket } from "./sellerSocket.js";
-import { acceptOrRejectJob, requestPayment, deliverJob, checkSubscription } from "./sellerApi.js";
+import { acceptOrRejectJob, requestPayment, deliverJob } from "./sellerApi.js";
 import { loadOffering, listOfferings } from "./offerings.js";
 import { JobPhase, type JobEventData, type SignMemoRequestData } from "./types.js";
 import type { ExecuteJobResult } from "./offeringTypes.js";
@@ -12,10 +12,11 @@ import {
   removePidFromConfig,
   sanitizeAgentName,
   requireApiKey,
-  getActiveAgent,
 } from "../../lib/config.js";
 import { ContractClient } from "../../lib/contract-client.js";
 import client from "../../lib/client.js";
+import type { JsonObject } from "../../lib/types.js";
+import { loadSigningWallet } from "../../lib/keystore.js";
 
 function setupCleanupHandlers(): void {
   const cleanup = () => {
@@ -47,37 +48,41 @@ const MARKETPLACE_URL = process.env.YOSO_SOCKET_URL || "https://yoso.bet";
 let agentDirName: string = "";
 let contractClient: ContractClient | null = null;
 
-function resolveOfferingName(data: JobEventData): string | undefined {
-  try {
-    const negotiationMemo = data.memos.find((m) => m.nextPhase === JobPhase.NEGOTIATION);
-    if (negotiationMemo) {
-      return JSON.parse(negotiationMemo.content).name;
-    }
-  } catch {
-    return undefined;
-  }
+type NegotiationDetails =
+  | { ok: true; offeringName: string; requirements: JsonObject }
+  | { ok: false; reason: string };
+
+function isRecord(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function resolveServiceRequirements(data: JobEventData): Record<string, any> {
+function parseNegotiationDetails(data: JobEventData): NegotiationDetails {
   const negotiationMemo = data.memos.find((m) => m.nextPhase === JobPhase.NEGOTIATION);
-  if (negotiationMemo) {
-    try {
-      return JSON.parse(negotiationMemo.content).requirement;
-    } catch {
-      return {};
-    }
+  if (!negotiationMemo) {
+    return { ok: false, reason: "Missing negotiation memo" };
   }
-  return {};
-}
 
-function isSubscriptionJob(data: JobEventData): boolean {
-  const negotiationMemo = data.memos.find((m) => m.nextPhase === JobPhase.NEGOTIATION);
-  if (!negotiationMemo) return false;
+  let parsed: unknown;
   try {
-    return JSON.parse(negotiationMemo.content).priceType === "subscription";
+    parsed = JSON.parse(negotiationMemo.content);
   } catch {
-    return false;
+    return { ok: false, reason: "Malformed negotiation memo" };
   }
+
+  if (!isRecord(parsed) || typeof parsed.name !== "string" || !parsed.name.trim()) {
+    return { ok: false, reason: "Invalid offering name" };
+  }
+
+  const requirement = parsed.requirement;
+  if (requirement !== undefined && !isRecord(requirement)) {
+    return { ok: false, reason: "Invalid service requirements" };
+  }
+
+  return {
+    ok: true,
+    offeringName: parsed.name,
+    requirements: requirement ?? {},
+  };
 }
 
 async function handleNewTask(data: JobEventData): Promise<void> {
@@ -86,31 +91,28 @@ async function handleNewTask(data: JobEventData): Promise<void> {
   console.log(`\n${"=".repeat(60)}`);
   console.log(`[seller] New task  jobId=${jobId}  phase=${JobPhase[data.phase] ?? data.phase}`);
   console.log(`         client=${data.clientAddress}  price=${data.price}`);
-  console.log(`         context=${JSON.stringify(data.context)}`);
   console.log(`${"=".repeat(60)}`);
 
-  // Step 1: Accept / reject
   if (data.phase === JobPhase.REQUEST) {
     if (!data.memoToSign) {
       return;
     }
 
-    const negotiationMemo = data.memos.find((m) => m.id == Number(data.memoToSign));
+    const negotiationMemo = data.memos.find((m) => m.id === Number(data.memoToSign));
 
     if (negotiationMemo?.nextPhase !== JobPhase.NEGOTIATION) {
       return;
     }
 
-    const offeringName = resolveOfferingName(data);
-    const requirements = resolveServiceRequirements(data);
-
-    if (!offeringName) {
+    const details = parseNegotiationDetails(data);
+    if (!details.ok) {
       await acceptOrRejectJob(jobId, {
         accept: false,
-        reason: "Invalid offering name",
+        reason: details.reason,
       });
       return;
     }
+    const { offeringName, requirements } = details;
 
     try {
       const { config, handlers } = await loadOffering(offeringName, agentDirName);
@@ -132,7 +134,7 @@ async function handleNewTask(data: JobEventData): Promise<void> {
         if (!isValid) {
           const rejectionReason = reason || "Validation failed";
           console.log(
-            `[seller] Validation failed for offering "${offeringName}" — rejecting: ${rejectionReason}`
+            `[seller] Validation failed for offering "${offeringName}" - rejecting: ${rejectionReason}`
           );
           await acceptOrRejectJob(jobId, {
             accept: false,
@@ -157,28 +159,8 @@ async function handleNewTask(data: JobEventData): Promise<void> {
         ? await handlers.requestPayment(requirements)
         : (funds?.content ?? "Request accepted");
 
-      // For subscription jobs, check status and append to content
-      let content = paymentReason;
-      if (isSubscriptionJob(data)) {
-        const subCheck = await checkSubscription(
-          data.clientAddress,
-          data.providerAddress,
-          offeringName
-        );
-
-        if (subCheck.needsSubscriptionPayment && subCheck.tier) {
-          console.log(
-            `[seller] Job ${jobId} requires subscription payment for tier "${subCheck.tier.name}"`
-          );
-          content = `${paymentReason}\nSubscription required: ${subCheck.tier.name} (${subCheck.tier.price} USDC for ${subCheck.tier.duration} days)`;
-        } else {
-          console.log(`[seller] Job ${jobId} — valid subscription, proceeding`);
-          content = `${paymentReason}\nSubscription active`;
-        }
-      }
-
       await requestPayment(jobId, {
-        content,
+        content: paymentReason,
         payableDetail: funds
           ? {
               amount: funds.amount,
@@ -194,11 +176,10 @@ async function handleNewTask(data: JobEventData): Promise<void> {
 
   // Handle TRANSACTION (deliver)
   if (data.phase === JobPhase.TRANSACTION) {
-    const offeringName = resolveOfferingName(data);
-    const requirements = resolveServiceRequirements(data);
-
-    if (offeringName) {
+    const details = parseNegotiationDetails(data);
+    if (details.ok) {
       try {
+        const { offeringName, requirements } = details;
         const { handlers } = await loadOffering(offeringName, agentDirName);
         console.log(
           `[seller] Executing offering "${offeringName}" for job ${jobId} (TRANSACTION phase)...`
@@ -209,18 +190,18 @@ async function handleNewTask(data: JobEventData): Promise<void> {
           deliverable: result.deliverable,
           payableDetail: result.payableDetail,
         });
-        console.log(`[seller] Job ${jobId} — delivered.`);
+        console.log(`[seller] Job ${jobId} - delivered.`);
       } catch (err) {
         console.error(`[seller] Error delivering job ${jobId}:`, err);
       }
     } else {
-      console.log(`[seller] Job ${jobId} in TRANSACTION but no offering resolved — skipping`);
+      console.log(`[seller] Job ${jobId} in TRANSACTION but ${details.reason} - skipping`);
     }
     return;
   }
 
   console.log(
-    `[seller] Job ${jobId} in phase ${JobPhase[data.phase] ?? data.phase} — no action needed`
+    `[seller] Job ${jobId} in phase ${JobPhase[data.phase] ?? data.phase} - no action needed`
   );
 }
 
@@ -229,7 +210,7 @@ async function handleSignMemoRequest(data: SignMemoRequestData): Promise<void> {
 
   if (!contractClient) {
     console.error(
-      `[seller] signMemoRequest for job ${jobId} — no on-chain client (missing private key)`
+      `[seller] signMemoRequest for job ${jobId} - no on-chain client (missing private key)`
     );
     return;
   }
@@ -249,14 +230,18 @@ async function handleSignMemoRequest(data: SignMemoRequestData): Promise<void> {
     data.type === "completion"
       ? `/agents/jobs/${jobId}/claim-confirm`
       : `/agents/jobs/${jobId}/escrow-confirm`;
+  const confirmationLabel =
+    data.type === "completion"
+      ? data.nextPhase === JobPhase.REJECTED
+        ? "Refund"
+        : "Claim"
+      : "Escrow";
   try {
     await client.post(endpoint, {
       memoId,
       signTxHash: result.data.txHash,
     });
-    console.log(
-      `[seller] ${data.type === "completion" ? "Claim" : "Escrow"} confirmed for job ${jobId}`
-    );
+    console.log(`[seller] ${confirmationLabel} confirmed for job ${jobId}`);
   } catch (err) {
     console.error(`[seller] Failed to report ${endpoint} for job ${jobId}:`, err);
   }
@@ -285,21 +270,13 @@ async function main() {
     `[seller] Available offerings: ${offerings.length > 0 ? offerings.join(", ") : "(none)"}`
   );
 
-  const activeAgent = getActiveAgent();
-  if (activeAgent?.walletPrivateKey) {
-    // Verify local key matches the wallet the server knows about
-    const { ethers } = await import("ethers");
-    const derivedAddress = new ethers.Wallet(activeAgent.walletPrivateKey).address;
-    if (derivedAddress.toLowerCase() !== walletAddress.toLowerCase()) {
-      console.error(
-        `[seller] FATAL: Local private key derives ${derivedAddress}, but server says wallet is ${walletAddress}. Aborting.`
-      );
-      process.exit(1);
-    }
-    contractClient = new ContractClient(activeAgent.walletPrivateKey);
+  try {
+    const wallet = await loadSigningWallet(walletAddress);
+    contractClient = new ContractClient(wallet.privateKey);
     console.log("[seller] On-chain signing enabled");
-  } else {
-    console.log("[seller] No private key — on-chain signing disabled (paid jobs won't work)");
+  } catch (err) {
+    console.error(`[seller] FATAL: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
   }
 
   const apiKey = requireApiKey();
@@ -315,7 +292,7 @@ async function main() {
       },
       onEvaluate: (data) => {
         console.log(
-          `[seller] onEvaluate received for job ${data.id} — no action (evaluation handled externally)`
+          `[seller] onEvaluate received for job ${data.id} - no action (evaluation handled externally)`
         );
       },
       onSignMemoRequest: (data) => {

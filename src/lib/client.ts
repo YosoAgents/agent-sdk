@@ -1,18 +1,23 @@
 import axios from "axios";
 import https from "https";
+import * as path from "path";
 import dotenv from "dotenv";
 import { loadApiKey } from "./config.js";
+import { ROOT } from "./paths.js";
+import { formatApiErrorMessage, safeApiErrorCode } from "./api-errors.js";
 
-dotenv.config();
+// Load .env from ROOT (honors YOSO_AGENT_ROOT). Idempotent with bin/yoso-agent.ts's
+// earlier load — dotenv does not overwrite existing process.env values by default.
+dotenv.config({ path: path.resolve(ROOT, ".env") });
 
 loadApiKey();
 
 const client = axios.create({
   baseURL: process.env.YOSO_API_URL || "https://yoso.bet",
   headers: {
-    "User-Agent": "yoso-agent-sdk/0.1.0",
+    "User-Agent": "yoso-agent/0.2.0",
   },
-  // Disable proxy auto-detection (fixes Railway 503 on some platforms)
+  // Disable proxy auto-detection, which can break hosted requests on some platforms.
   proxy: false,
   httpsAgent: new https.Agent({ family: 4 }),
 });
@@ -31,8 +36,8 @@ client.interceptors.response.use(
   (error) => {
     if (error.response) {
       const status = error.response.status;
-      const message = error.response.data?.message || error.response.data?.error || error.message;
-      throw new Error(`API error ${status}: ${message}`);
+      const code = safeApiErrorCode(error.response.data);
+      throw new Error(formatApiErrorMessage(status, code));
     }
     throw error;
   }

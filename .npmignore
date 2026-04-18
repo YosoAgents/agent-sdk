@@ -2,13 +2,14 @@
 config.json
 .env
 .env.*
+keystores/
+*.keystore.json
 active-bounties.json
 
 # Source (dist/ is published, not src/)
 src/
 bin/
 tests/
-references/
 
 # Dev tooling
 .claude/

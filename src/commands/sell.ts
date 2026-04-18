@@ -1,27 +1,20 @@
 import * as fs from "fs";
 import * as path from "path";
-import { fileURLToPath } from "url";
 import * as output from "../lib/output.js";
 import {
   createJobOffering,
   deleteJobOffering,
-  upsertResourceApi,
-  deleteResourceApi,
-  createSubscription,
-  updateSubscription,
-  deleteSubscription,
   type JobOfferingData,
   type PriceV2,
   type Resource,
 } from "../lib/api.js";
 import { getMyAgentInfo } from "../lib/wallet.js";
-import { formatPrice, getActiveAgent, sanitizeAgentName } from "../lib/config.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { formatPrice, getActiveAgent, sanitizeAgentName, ROOT } from "../lib/config.js";
+import type { JsonObject } from "../lib/types.js";
+import { checkForLegacyOfferings } from "./legacy-offerings.js";
 
 /** Offerings base: src/seller/offerings/ */
-const OFFERINGS_BASE = path.resolve(__dirname, "..", "seller", "offerings");
+const OFFERINGS_BASE = path.resolve(ROOT, "src", "seller", "offerings");
 
 /** Offerings root for the current agent: src/seller/offerings/<agent-name>/ */
 function getOfferingsRoot(): string {
@@ -33,76 +26,6 @@ function getOfferingsRoot(): string {
   return path.resolve(OFFERINGS_BASE, sanitizeAgentName(agent.name));
 }
 
-/**
- * Detect offerings in the old flat structure (src/seller/offerings/<offering>/)
- * instead of the new per-agent structure (src/seller/offerings/<agent>/<offering>/).
- * Warns the user and shows the move command.
- */
-export async function checkForLegacyOfferings(): Promise<void> {
-  if (!fs.existsSync(OFFERINGS_BASE)) return;
-
-  const agent = getActiveAgent();
-  if (!agent) return;
-  const agentDir = sanitizeAgentName(agent.name);
-
-  const entries = fs.readdirSync(OFFERINGS_BASE, { withFileTypes: true });
-  const legacyOfferings = entries.filter((e) => {
-    if (!e.isDirectory()) return false;
-    // Skip if it looks like an agent directory (contains subdirectories with offering.json)
-    const subPath = path.join(OFFERINGS_BASE, e.name);
-    const hasOfferingJson = fs.existsSync(path.join(subPath, "offering.json"));
-    const hasHandlers = fs.existsSync(path.join(subPath, "handlers.ts"));
-    // It's a legacy offering if it has offering.json + handlers.ts directly
-    return hasOfferingJson && hasHandlers;
-  });
-
-  if (legacyOfferings.length === 0) return;
-
-  const agentInfo = await getMyAgentInfo();
-  const registeredOfferingNames = new Set(agentInfo.jobs?.map((job) => job.name) || []);
-
-  const agentLegacyOfferings = legacyOfferings.filter((e) => {
-    if (registeredOfferingNames.has(e.name)) {
-      return true;
-    }
-    try {
-      const offeringJsonPath = path.join(OFFERINGS_BASE, e.name, "offering.json");
-      if (fs.existsSync(offeringJsonPath)) {
-        const offeringJson: OfferingJson = JSON.parse(fs.readFileSync(offeringJsonPath, "utf-8"));
-        return registeredOfferingNames.has(offeringJson.name);
-      }
-    } catch {
-      // If we can't read the file, skip this check
-    }
-    return false;
-  });
-
-  // Only show warning if there are legacy offerings that belong to the current agent
-  if (agentLegacyOfferings.length === 0) return;
-
-  const names = agentLegacyOfferings.map((e) => e.name);
-  output.warn(
-    `Found ${names.length} offering(s) in the legacy directory structure:\n` +
-      names.map((n) => `    - src/seller/offerings/${n}/`).join("\n") +
-      "\n\n" +
-      `  Job offerings should be placed and classified by agent name in src/seller/offerings/${agentDir}/\n` +
-      `  Move them with:\n\n` +
-      names
-        .map((n) => `    mv src/seller/offerings/${n} src/seller/offerings/${agentDir}/${n}`)
-        .join("\n") +
-      "\n"
-  );
-}
-
-/** Resources live at src/seller/resources/ */
-const RESOURCES_ROOT = path.resolve(__dirname, "..", "seller", "resources");
-
-interface InlineSubscriptionTier {
-  name: string;
-  price: number; // USDC
-  duration: number; // days
-}
-
 interface OfferingJson {
   name: string;
   description: string;
@@ -111,9 +34,9 @@ interface OfferingJson {
   priceV2?: PriceV2;
   slaMinutes?: number;
   requiredFunds: boolean;
-  requirement?: Record<string, any>;
+  requirement?: JsonObject;
   deliverable?: string;
-  subscriptionTiers?: InlineSubscriptionTier[];
+  resources?: Resource[];
 }
 
 interface ValidationResult {
@@ -123,7 +46,16 @@ interface ValidationResult {
 }
 
 function resolveOfferingDir(offeringName: string): string {
-  return path.resolve(getOfferingsRoot(), offeringName);
+  if (!/^[a-zA-Z0-9_-]+$/.test(offeringName)) {
+    output.fatal("Offering name may only contain letters, numbers, underscores, and hyphens.");
+  }
+  const root = getOfferingsRoot();
+  const dir = path.resolve(root, offeringName);
+  const rel = path.relative(root, dir);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    output.fatal("Offering path must stay inside the active agent's offerings directory.");
+  }
+  return dir;
 }
 
 function validateOfferingJson(filePath: string): ValidationResult {
@@ -135,7 +67,7 @@ function validateOfferingJson(filePath: string): ValidationResult {
     return result;
   }
 
-  let json: any;
+  let json: unknown;
   try {
     json = JSON.parse(fs.readFileSync(filePath, "utf-8"));
   } catch (err) {
@@ -143,113 +75,149 @@ function validateOfferingJson(filePath: string): ValidationResult {
     result.errors.push(`Invalid JSON in offering.json: ${err}`);
     return result;
   }
+  if (typeof json !== "object" || json === null || Array.isArray(json)) {
+    result.valid = false;
+    result.errors.push("offering.json must be a JSON object");
+    return result;
+  }
+  const offering = json as Record<string, unknown>;
 
-  if (!json.name || typeof json.name !== "string" || json.name.trim() === "") {
+  if (!offering.name || typeof offering.name !== "string" || offering.name.trim() === "") {
     result.valid = false;
     result.errors.push(
-      'offering.json: "name" is required — set to a non-empty string matching the directory name'
+      'offering.json: "name" is required - set to a non-empty string matching the directory name'
     );
   }
-  if (!json.description || typeof json.description !== "string" || json.description.trim() === "") {
+  if (
+    !offering.description ||
+    typeof offering.description !== "string" ||
+    offering.description.trim() === ""
+  ) {
     result.valid = false;
     result.errors.push(
-      'offering.json: "description" is required — describe what this service does for buyers'
+      'offering.json: "description" is required - describe what this service does for buyers'
     );
   }
-  if (json.jobFee === undefined || json.jobFee === null) {
+  if (offering.jobFee === undefined || offering.jobFee === null) {
     result.valid = false;
-    // Validate jobFee presence, type, and value based on jobFeeType
-    if (json.jobFee === undefined || json.jobFee === null) {
-      result.valid = false;
-      result.errors.push(
-        'offering.json: "jobFee" is required — set to a number (see "jobFeeType" docs)'
-      );
-    } else if (typeof json.jobFee !== "number") {
-      result.valid = false;
-      result.errors.push('offering.json: "jobFee" must be a number');
-    }
+    result.errors.push(
+      'offering.json: "jobFee" is required - set to a number (see "jobFeeType" docs)'
+    );
+  } else if (typeof offering.jobFee !== "number") {
+    result.valid = false;
+    result.errors.push('offering.json: "jobFee" must be a number');
+  }
 
-    if (json.jobFeeType === undefined || json.jobFeeType === null) {
-      result.valid = false;
-      result.errors.push('offering.json: "jobFeeType" is required ("fixed" or "percentage")');
-    } else if (json.jobFeeType !== "fixed" && json.jobFeeType !== "percentage") {
-      result.valid = false;
-      result.errors.push('offering.json: "jobFeeType" must be either "fixed" or "percentage"');
-    }
+  if (offering.jobFeeType === undefined || offering.jobFeeType === null) {
+    result.valid = false;
+    result.errors.push('offering.json: "jobFeeType" is required ("fixed" or "percentage")');
+  } else if (offering.jobFeeType !== "fixed" && offering.jobFeeType !== "percentage") {
+    result.valid = false;
+    result.errors.push('offering.json: "jobFeeType" must be either "fixed" or "percentage"');
+  }
 
-    // Additional validation if both jobFee is a number and jobFeeType is set
-    if (typeof json.jobFee === "number" && json.jobFeeType) {
-      if (json.jobFeeType === "fixed") {
-        if (json.jobFee < 0) {
-          result.valid = false;
-          result.errors.push(
-            'offering.json: "jobFee" must be a non-negative number (fee in USDC per job) for fixed fee type'
-          );
-        }
-        if (json.jobFee === 0) {
-          result.warnings.push('offering.json: "jobFee" is 0; jobs will pay no fee to seller');
-        }
-      } else if (json.jobFeeType === "percentage") {
-        if (json.jobFee < 0.001 || json.jobFee > 0.99) {
-          result.valid = false;
-          result.errors.push(
-            'offering.json: "jobFee" must be >= 0.001 and <= 0.99 (value in decimals, eg. 50% = 0.5) for percentage fee type'
-          );
-        }
+  if (typeof offering.jobFee === "number" && offering.jobFeeType) {
+    if (offering.jobFeeType === "fixed") {
+      if (offering.jobFee < 0) {
+        result.valid = false;
+        result.errors.push(
+          'offering.json: "jobFee" must be a non-negative number (fee in USDC per job) for fixed fee type'
+        );
+      }
+      if (offering.jobFee === 0) {
+        result.warnings.push('offering.json: "jobFee" is 0; jobs will pay no fee to seller');
+      }
+    } else if (offering.jobFeeType === "percentage") {
+      if (offering.jobFee < 0.001 || offering.jobFee > 0.99) {
+        result.valid = false;
+        result.errors.push(
+          'offering.json: "jobFee" must be >= 0.001 and <= 0.99 (value in decimals, eg. 50% = 0.5) for percentage fee type'
+        );
       }
     }
   }
-  if (json.requiredFunds === undefined || json.requiredFunds === null) {
+  if (offering.requiredFunds === undefined || offering.requiredFunds === null) {
     result.valid = false;
     result.errors.push(
-      'offering.json: "requiredFunds" is required — set to true if the job needs additional token transfer beyond the fee, false otherwise'
+      'offering.json: "requiredFunds" is required - set to true if the job needs additional token transfer beyond the fee, false otherwise'
     );
-  } else if (typeof json.requiredFunds !== "boolean") {
+  } else if (typeof offering.requiredFunds !== "boolean") {
     result.valid = false;
     result.errors.push('offering.json: "requiredFunds" must be true or false');
   }
 
-  if (json.subscriptionTiers !== undefined) {
-    if (!Array.isArray(json.subscriptionTiers)) {
+  if (offering.subscriptionTiers !== undefined) {
+    result.valid = false;
+    result.errors.push(
+      'offering.json: "subscriptionTiers" is not supported by the public YOSO backend yet; remove it and use standard per-job pricing'
+    );
+  }
+
+  if (offering.resources !== undefined) {
+    if (!Array.isArray(offering.resources)) {
       result.valid = false;
-      result.errors.push('offering.json: "subscriptionTiers" must be an array of tier objects');
+      result.errors.push('offering.json: "resources" must be an array of resource objects');
     } else {
-      for (let i = 0; i < json.subscriptionTiers.length; i++) {
-        const tier = json.subscriptionTiers[i];
-        if (typeof tier !== "object" || tier === null) {
+      for (let i = 0; i < offering.resources.length; i++) {
+        const resource = offering.resources[i];
+        if (typeof resource !== "object" || resource === null) {
           result.valid = false;
           result.errors.push(
-            `offering.json: subscriptionTiers[${i}] must be an object with {name, price, duration}`
+            `offering.json: resources[${i}] must be an object with {name, description, url}`
           );
           continue;
         }
-        if (!tier.name || typeof tier.name !== "string" || tier.name.trim() === "") {
+        if (!resource.name || typeof resource.name !== "string" || resource.name.trim() === "") {
           result.valid = false;
-          result.errors.push(
-            `offering.json: subscriptionTiers[${i}].name is required (non-empty string)`
-          );
+          result.errors.push(`offering.json: resources[${i}].name is required`);
         }
-        if (tier.price == null || typeof tier.price !== "number" || tier.price <= 0) {
+        if (
+          !resource.description ||
+          typeof resource.description !== "string" ||
+          resource.description.trim() === ""
+        ) {
           result.valid = false;
-          result.errors.push(
-            `offering.json: subscriptionTiers[${i}].price must be a positive number (USDC)`
-          );
+          result.errors.push(`offering.json: resources[${i}].description is required`);
         }
-        if (tier.duration == null || typeof tier.duration !== "number" || tier.duration <= 0) {
+        if (!resource.url || typeof resource.url !== "string" || resource.url.trim() === "") {
           result.valid = false;
-          result.errors.push(
-            `offering.json: subscriptionTiers[${i}].duration must be a positive number (days)`
-          );
+          result.errors.push(`offering.json: resources[${i}].url is required`);
+        } else {
+          try {
+            const parsed = new URL(resource.url);
+            if (parsed.protocol !== "https:") {
+              result.valid = false;
+              result.errors.push(`offering.json: resources[${i}].url must use HTTPS`);
+            }
+          } catch {
+            result.valid = false;
+            result.errors.push(`offering.json: resources[${i}].url must be a valid URL`);
+          }
+        }
+        if (
+          resource.params !== undefined &&
+          (typeof resource.params !== "object" ||
+            resource.params === null ||
+            Array.isArray(resource.params))
+        ) {
+          result.valid = false;
+          result.errors.push(`offering.json: resources[${i}].params must be an object if provided`);
         }
       }
-      const names = json.subscriptionTiers
-        .filter((t: any) => typeof t === "object" && t?.name)
-        .map((t: any) => t.name);
+      const names = offering.resources
+        .filter(
+          (resource): resource is { name: string } =>
+            typeof resource === "object" &&
+            resource !== null &&
+            "name" in resource &&
+            typeof resource.name === "string"
+        )
+        .map((resource) => resource.name);
       const dupes = names.filter((n: string, i: number) => names.indexOf(n) !== i);
       if (dupes.length > 0) {
         result.valid = false;
         result.errors.push(
-          `offering.json: duplicate subscription tier names: ${[...new Set(dupes)].join(", ")}`
+          `offering.json: duplicate resource names: ${[...new Set(dupes)].join(", ")}`
         );
       }
     }
@@ -279,7 +247,7 @@ function validateHandlers(filePath: string, requiredFunds?: boolean): Validation
   if (!executeJobPatterns.some((p) => p.test(content))) {
     result.valid = false;
     result.errors.push(
-      'handlers.ts: must export an "executeJob" function — this is the required handler that runs your service logic'
+      'handlers.ts: must export an "executeJob" function - this is the required handler that runs your service logic'
     );
   }
 
@@ -297,19 +265,19 @@ function validateHandlers(filePath: string, requiredFunds?: boolean): Validation
 
   if (!hasValidate) {
     result.warnings.push(
-      'handlers.ts: optional "validateRequirements" handler not found — requests will be accepted without validation'
+      'handlers.ts: optional "validateRequirements" handler not found - requests will be accepted without validation'
     );
   }
   if (requiredFunds === true && !hasFunds) {
     result.valid = false;
     result.errors.push(
-      'handlers.ts: "requiredFunds" is true in offering.json — must export "requestAdditionalFunds" to specify the token transfer details'
+      'handlers.ts: "requiredFunds" is true in offering.json - must export "requestAdditionalFunds" to specify the token transfer details'
     );
   }
   if (requiredFunds === false && hasFunds) {
     result.valid = false;
     result.errors.push(
-      'handlers.ts: "requiredFunds" is false in offering.json — must NOT export "requestAdditionalFunds" (remove it, or set requiredFunds to true)'
+      'handlers.ts: "requiredFunds" is false in offering.json - must NOT export "requestAdditionalFunds" (remove it, or set requiredFunds to true)'
     );
   }
 
@@ -325,9 +293,7 @@ function buildOfferingPayload(json: OfferingJson): JobOfferingData {
     requiredFunds: json.requiredFunds,
     requirement: json.requirement ?? {},
     deliverable: json.deliverable ?? "string",
-    ...(json.subscriptionTiers?.length && {
-      subscriptionTiers: json.subscriptionTiers.map((t) => t.name),
-    }),
+    ...(json.resources?.length && { resources: json.resources }),
   };
 }
 
@@ -355,23 +321,17 @@ export async function init(offeringName: string): Promise<void> {
 
   fs.writeFileSync(path.join(dir, "offering.json"), JSON.stringify(offeringJson, null, 2) + "\n");
 
-  const handlersTemplate = `import type { ExecuteJobResult, ValidationResult } from "../../../runtime/offeringTypes.js";
+  const handlersTemplate = `import type { ExecuteJobResult, ValidationResult } from "yoso-agent";
 
-// Required: implement your service logic here
-export async function executeJob(request: any): Promise<ExecuteJobResult> {
-  // TODO: Implement your service
-  return { deliverable: "TODO: Return your result" };
+export async function executeJob(request: Record<string, unknown>): Promise<ExecuteJobResult> {
+  throw new Error("Implement this offering before listing it on the marketplace.");
 }
 
-// Optional: validate incoming requests
-export function validateRequirements(request: any): ValidationResult {
-  // Return { valid: true } to accept, or { valid: false, reason: "explanation" } to reject
+export function validateRequirements(request: Record<string, unknown>): ValidationResult {
   return { valid: true };
 }
 
-// Optional: provide custom payment request message
-export function requestPayment(request: any): string {
-  // Return a custom message/reason for the payment request
+export function requestPayment(request: Record<string, unknown>): string {
   return "Request accepted";
 }
 `;
@@ -417,12 +377,12 @@ export async function create(offeringName: string): Promise<void> {
   let parsedOffering: OfferingJson | null = null;
   if (jsonResult.valid) {
     parsedOffering = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
-    output.log(`    Valid — Name: "${parsedOffering!.name}"`);
+    output.log(`    Valid - Name: "${parsedOffering!.name}"`);
     output.log(`             Fee: ${parsedOffering!.jobFee} USDC`);
     output.log(`             Funds required: ${parsedOffering!.requiredFunds}`);
-    if (parsedOffering!.subscriptionTiers?.length) {
+    if (parsedOffering!.resources?.length) {
       output.log(
-        `             Subscription tiers: ${parsedOffering!.subscriptionTiers.map((t) => `${t.name} (${t.price} USDC, ${t.duration}d)`).join(", ")}`
+        `             Resources: ${parsedOffering!.resources.map((resource) => resource.name).join(", ")}`
       );
     }
   } else {
@@ -437,7 +397,7 @@ export async function create(offeringName: string): Promise<void> {
   allWarnings.push(...handlersResult.warnings);
 
   if (handlersResult.valid) {
-    output.log("    Valid — executeJob handler found");
+    output.log("    Valid - executeJob handler found");
   } else {
     output.log("    Invalid");
   }
@@ -447,54 +407,6 @@ export async function create(offeringName: string): Promise<void> {
   if (allWarnings.length > 0) {
     output.log("\n  Warnings:");
     allWarnings.forEach((w) => output.log(`    - ${w}`));
-  }
-
-  // Sync subscription tiers with backend
-  if (parsedOffering?.subscriptionTiers?.length) {
-    output.log("\n  Syncing subscription tiers...");
-    try {
-      const agentInfo = await getMyAgentInfo();
-      const existingTiers = agentInfo.subscriptions ?? [];
-
-      for (const tier of parsedOffering.subscriptionTiers) {
-        const existing = existingTiers.find((t) => t.name === tier.name);
-        if (existing) {
-          const durationSeconds = tier.duration * 86400;
-          if (existing.price !== tier.price || existing.duration !== durationSeconds) {
-            const updates: { price?: number; duration?: number } = {};
-            if (existing.price !== tier.price) updates.price = tier.price;
-            if (existing.duration !== durationSeconds) updates.duration = tier.duration;
-            const updateResult = await updateSubscription(tier.name, updates);
-            if (updateResult.success) {
-              output.log(
-                `    Updated tier "${tier.name}" (${tier.price} USDC, ${tier.duration} days)`
-              );
-            } else {
-              allErrors.push(`Failed to update subscription tier "${tier.name}"`);
-            }
-          } else {
-            output.log(`    Tier "${tier.name}" already exists — no change`);
-          }
-        } else {
-          const createResult = await createSubscription({
-            name: tier.name,
-            price: tier.price,
-            duration: tier.duration,
-          });
-          if (createResult.success) {
-            output.log(
-              `    Created tier "${tier.name}" (${tier.price} USDC, ${tier.duration} days)`
-            );
-          } else {
-            allErrors.push(`Failed to create subscription tier "${tier.name}"`);
-          }
-        }
-      }
-    } catch (err) {
-      allErrors.push(
-        `Failed to sync subscription tiers: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
   }
 
   if (allErrors.length > 0) {
@@ -507,10 +419,10 @@ export async function create(offeringName: string): Promise<void> {
 
   // Register with marketplace
   const json: OfferingJson = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
-  const acpPayload = buildOfferingPayload(json);
+  const payload = buildOfferingPayload(json);
 
   output.log("  Registering offering on marketplace...");
-  const result = await createJobOffering(acpPayload);
+  const result = await createJobOffering(payload);
 
   if (result.success) {
     output.log("    Offering registered successfully.\n");
@@ -545,7 +457,7 @@ interface LocalOffering {
   jobFee: number;
   jobFeeType: "fixed" | "percentage";
   requiredFunds: boolean;
-  subscriptionTiers?: InlineSubscriptionTier[];
+  resources?: Resource[];
 }
 
 function listLocalOfferings(): LocalOffering[] {
@@ -567,7 +479,7 @@ function listLocalOfferings(): LocalOffering[] {
           jobFee: json.jobFee ?? 0,
           jobFeeType: json.jobFeeType ?? "fixed",
           requiredFunds: json.requiredFunds ?? false,
-          ...(json.subscriptionTiers && { subscriptionTiers: json.subscriptionTiers }),
+          ...(json.resources && { resources: json.resources }),
         } as LocalOffering;
       } catch {
         return null;
@@ -588,30 +500,30 @@ async function fetchRemoteOfferings(): Promise<RemoteOffering[]> {
     const agentInfo = await getMyAgentInfo();
     return agentInfo.jobs ?? [];
   } catch {
-    // API error — can't determine listing status
+    // API error - can't determine listing status
     return [];
   }
 }
 
-function acpOfferingNames(acpOfferings: RemoteOffering[]): Set<string> {
-  return new Set(acpOfferings.map((o) => o.name));
+function remoteOfferingNames(remoteOfferings: RemoteOffering[]): Set<string> {
+  return new Set(remoteOfferings.map((o) => o.name));
 }
 
 export async function list(): Promise<void> {
   await checkForLegacyOfferings();
-  const acpOfferings = await fetchRemoteOfferings();
-  const acpNames = acpOfferingNames(acpOfferings);
+  const remoteOfferings = await fetchRemoteOfferings();
+  const remoteNames = remoteOfferingNames(remoteOfferings);
   const localOfferings = listLocalOfferings();
   const localNames = new Set(localOfferings.map((o) => o.name));
 
   const localData = localOfferings.map((o) => ({
     ...o,
-    listed: acpNames.has(o.name),
-    acpOnly: false as const,
+    listed: remoteNames.has(o.name),
+    remoteOnly: false as const,
   }));
 
   // Remote-only offerings: listed on marketplace but no local directory
-  const acpOnlyData = acpOfferings
+  const remoteOnlyData = remoteOfferings
     .filter((o) => !localNames.has(o.name))
     .map((o) => ({
       dirName: "",
@@ -620,11 +532,12 @@ export async function list(): Promise<void> {
       jobFee: o.priceV2?.value ?? 0,
       jobFeeType: o.priceV2?.type ?? "fixed",
       requiredFunds: o.requiredFunds ?? false,
+      resources: undefined,
       listed: true,
-      acpOnly: true as const,
+      remoteOnly: true as const,
     }));
 
-  const data = [...localData, ...acpOnlyData];
+  const data = [...localData, ...remoteOnlyData];
 
   output.output(data, (offerings) => {
     output.heading("Job Offerings");
@@ -635,27 +548,25 @@ export async function list(): Promise<void> {
     }
 
     for (const o of offerings) {
-      const status = o.acpOnly
+      const status = o.remoteOnly
         ? "Listed on marketplace (no local files)"
         : o.listed
           ? "Listed"
           : "Local only";
       output.log(`\n  ${o.name}`);
-      if (!o.acpOnly) {
+      if (!o.remoteOnly) {
         output.field("    Description", o.description);
       }
       output.field("    Fee", `${formatPrice(o.jobFee, o.jobFeeType)}`);
       output.field("    Funds required", String(o.requiredFunds));
-      if (o.subscriptionTiers?.length) {
+      if (o.resources?.length) {
         output.field(
-          "    Subscription tiers",
-          o.subscriptionTiers
-            .map((t: InlineSubscriptionTier) => `${t.name} (${t.price} USDC, ${t.duration}d)`)
-            .join(", ")
+          "    Resources",
+          o.resources.map((resource: Resource) => resource.name).join(", ")
         );
       }
       output.field("    Status", status);
-      if (o.acpOnly) {
+      if (o.remoteOnly) {
         output.log(
           "    Tip: Run `yoso-agent sell delete " + o.name + "` to delist from marketplace"
         );
@@ -701,8 +612,8 @@ export async function inspect(offeringName: string): Promise<void> {
   }
 
   const json = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-  const acpOfferings = await fetchRemoteOfferings();
-  const isListed = acpOfferingNames(acpOfferings).has(json.name);
+  const remoteOfferings = await fetchRemoteOfferings();
+  const isListed = remoteOfferingNames(remoteOfferings).has(json.name);
   const handlers = detectHandlers(offeringName);
 
   const data = {
@@ -718,13 +629,14 @@ export async function inspect(offeringName: string): Promise<void> {
     output.field("Funds required", String(d.requiredFunds));
     output.field("Status", d.listed ? "Listed on marketplace" : "Local only");
     output.field("Handlers", d.handlers.join(", ") || "(none)");
-    if (d.subscriptionTiers?.length) {
-      output.field(
-        "Subscription Tiers",
-        d.subscriptionTiers
-          .map((t: InlineSubscriptionTier) => `${t.name} (${t.price} USDC, ${t.duration}d)`)
-          .join(", ")
-      );
+    if (d.resources?.length) {
+      output.log("\n  Resources:");
+      for (const resource of d.resources as Resource[]) {
+        output.log(`    - ${resource.name}: ${resource.url}`);
+        if (resource.description) {
+          output.log(`      ${resource.description}`);
+        }
+      }
     }
     if (d.requirement) {
       output.log("\n  Requirement Schema:");
@@ -737,186 +649,4 @@ export async function inspect(offeringName: string): Promise<void> {
     }
     output.log("");
   });
-}
-
-function resolveResourceDir(resourceName: string): string {
-  return path.resolve(RESOURCES_ROOT, resourceName);
-}
-
-interface LocalResource {
-  dirName: string;
-  name: string;
-  description: string;
-  url: string;
-}
-
-async function fetchAcpResourceNames(): Promise<Resource[]> {
-  try {
-    const agentInfo = (await getMyAgentInfo()) as {
-      jobs?: unknown[];
-      resources?: Resource[];
-    };
-    return agentInfo.resources ?? [];
-  } catch {
-    return [];
-  }
-}
-
-export async function resourceList(): Promise<void> {
-  const resources = await fetchAcpResourceNames();
-
-  output.output(resources, (resources) => {
-    output.heading("Resources");
-
-    if (resources.length === 0) {
-      output.log(
-        "  No resources found. Run `yoso-agent sell resource init <name>` to create one.\n"
-      );
-      return;
-    }
-
-    for (const r of resources) {
-      output.log(`\n  ${r.name}`);
-      if (!r.acpOnly) {
-        output.field("    Description", r.description);
-        output.field("    URL", r.url);
-      }
-    }
-    output.log("");
-  });
-}
-
-function validateResourceJson(filePath: string): ValidationResult {
-  const result: ValidationResult = { valid: true, errors: [], warnings: [] };
-
-  if (!fs.existsSync(filePath)) {
-    result.valid = false;
-    result.errors.push(`resources.json not found at ${filePath}`);
-    return result;
-  }
-
-  let json: any;
-  try {
-    json = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-  } catch (err) {
-    result.valid = false;
-    result.errors.push(`Invalid JSON in resources.json: ${err}`);
-    return result;
-  }
-
-  if (!json.name || typeof json.name !== "string" || json.name.trim() === "") {
-    result.valid = false;
-    result.errors.push('"name" field is required (non-empty string)');
-  }
-  if (!json.description || typeof json.description !== "string" || json.description.trim() === "") {
-    result.valid = false;
-    result.errors.push('"description" field is required (non-empty string)');
-  }
-  if (!json.url || typeof json.url !== "string" || json.url.trim() === "") {
-    result.valid = false;
-    result.errors.push('"url" field is required (non-empty string)');
-  }
-  if (json.params !== undefined && json.params !== null) {
-    if (typeof json.params !== "object" || Array.isArray(json.params)) {
-      result.valid = false;
-      result.errors.push('"params" field must be an object if provided');
-    }
-  }
-
-  return result;
-}
-
-export async function resourceInit(resourceName: string): Promise<void> {
-  if (!resourceName) {
-    output.fatal("Usage: yoso-agent sell resource init <resource_name>");
-  }
-
-  const dir = resolveResourceDir(resourceName);
-  if (fs.existsSync(dir)) {
-    output.fatal(`Resource directory already exists: ${dir}`);
-  }
-
-  fs.mkdirSync(dir, { recursive: true });
-
-  const resourceJson = {
-    name: resourceName,
-    description: "TODO: Describe what this resource provides",
-    url: "https://api.example.com/endpoint",
-  };
-
-  fs.writeFileSync(path.join(dir, "resources.json"), JSON.stringify(resourceJson, null, 2) + "\n");
-
-  output.output({ created: dir }, () => {
-    output.heading("Resource Scaffolded");
-    output.log(`  Created: src/seller/resources/${resourceName}/`);
-    output.log(`    - resources.json  (edit name, description, url, params)`);
-    output.log(
-      `\n  Next: edit the file, then run: yoso-agent sell resource create ${resourceName}\n`
-    );
-  });
-}
-
-export async function resourceCreate(resourceName: string): Promise<void> {
-  if (!resourceName) {
-    output.fatal("Usage: yoso-agent sell resource create <resource_name>");
-  }
-
-  const dir = resolveResourceDir(resourceName);
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
-    output.fatal(
-      `Resource directory not found: ${dir}\n  Create it with: yoso-agent sell resource init ${resourceName}`
-    );
-  }
-
-  output.log(`\nValidating resource: "${resourceName}"\n`);
-
-  const jsonPath = path.join(dir, "resources.json");
-  const validation = validateResourceJson(jsonPath);
-
-  if (!validation.valid) {
-    output.log("  Errors:");
-    validation.errors.forEach((e) => output.log(`    - ${e}`));
-    output.fatal("\n  Validation failed. Fix the errors above.");
-  }
-
-  if (validation.warnings.length > 0) {
-    output.log("  Warnings:");
-    validation.warnings.forEach((w) => output.log(`    - ${w}`));
-  }
-
-  output.log("  Validation passed!\n");
-
-  // Register with marketplace
-  const json: any = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
-  const resource: Resource = {
-    name: json.name,
-    description: json.description,
-    url: json.url,
-    params: json.params,
-  };
-
-  output.log("  Registering resource on marketplace...");
-  const result = await upsertResourceApi(resource);
-
-  if (result.success) {
-    output.log("    Resource registered successfully.\n");
-  } else {
-    output.fatal("  Failed to register resource on marketplace.");
-  }
-}
-
-export async function resourceDelete(resourceName: string): Promise<void> {
-  if (!resourceName) {
-    output.fatal("Usage: yoso-agent sell resource delete <resource_name>");
-  }
-
-  output.log(`\n  Deleting resource: "${resourceName}"...\n`);
-
-  const result = await deleteResourceApi(resourceName);
-
-  if (result.success) {
-    output.log("  Resource deleted from marketplace.\n");
-  } else {
-    output.fatal("  Failed to delete resource from marketplace.");
-  }
 }

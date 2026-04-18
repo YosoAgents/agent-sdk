@@ -1,7 +1,5 @@
-import axios from "axios";
 import * as output from "../lib/output.js";
-
-const SEARCH_URL = process.env.YOSO_SEARCH_URL || "https://yoso.bet/api/agents/search";
+import { searchAgents } from "../lib/search-client.js";
 
 export interface SearchOptions {
   mode?: "hybrid" | "vector" | "keyword";
@@ -25,7 +23,7 @@ interface AgentJob {
   name: string;
   description: string;
   type: string;
-  price: number;
+  price?: number;
   priceV2: { type: string; value: number };
   requiredFunds: boolean;
   slaMinutes: number;
@@ -42,7 +40,7 @@ interface AgentResource {
 }
 
 interface Agent {
-  id: number;
+  id: number | string;
   name: string;
   description: string;
   contractAddress: string;
@@ -55,9 +53,10 @@ interface Agent {
   symbol: string | null;
   agentId: number | null;
   isYosoAgent: boolean;
-  metrics: AgentMetrics;
-  jobs: AgentJob[];
-  resources: AgentResource[];
+  metrics?: Partial<AgentMetrics>;
+  jobs?: AgentJob[];
+  offerings?: AgentJob[];
+  resources?: AgentResource[];
 }
 
 export const SEARCH_DEFAULTS = {
@@ -105,6 +104,10 @@ function truncate(s: string, max: number): string {
   return s.length > max ? s.slice(0, max - 1) + "…" : s;
 }
 
+function getOfferings(agent: Agent): AgentJob[] {
+  return agent.jobs ?? agent.offerings ?? [];
+}
+
 function formatTable(agents: Agent[]): void {
   const header = {
     rank: "#",
@@ -145,39 +148,45 @@ function formatTable(agents: Agent[]): void {
   // Rows
   for (let i = 0; i < agents.length; i++) {
     const a = agents[i];
+    const metrics = a.metrics ?? {};
+    const offerings = getOfferings(a);
     output.log(
       row({
         rank: String(i + 1),
-        name: a.name,
+        name: a.name ?? "-",
         id: String(a.id),
         category: a.category ?? "-",
-        rate: a.metrics.successRate != null ? `${a.metrics.successRate.toFixed(1)}%` : "-",
-        jobs: a.metrics.successfulJobCount != null ? String(a.metrics.successfulJobCount) : "-",
-        buyers: a.metrics.uniqueBuyerCount != null ? String(a.metrics.uniqueBuyerCount) : "-",
-        online: a.metrics.isOnline ? "Yes" : "No",
+        rate: metrics.successRate != null ? `${metrics.successRate.toFixed(1)}%` : "-",
+        jobs:
+          metrics.successfulJobCount != null
+            ? String(metrics.successfulJobCount)
+            : String(offerings.length),
+        buyers: metrics.uniqueBuyerCount != null ? String(metrics.uniqueBuyerCount) : "-",
+        online: metrics.isOnline == null ? "-" : metrics.isOnline ? "Yes" : "No",
       })
     );
   }
 }
 
-function formatPrice(price: number, priceType?: string): string {
+function formatPrice(price?: number, priceType?: string): string {
+  if (price == null) return "-";
   if (priceType === "percentage") return `${(price * 100).toFixed(1)}%`;
   return `$${price} USDC`;
 }
 
 function formatDetails(agents: Agent[]): void {
   for (const a of agents) {
-    output.log(`\n  ${output.colors.bold(a.name)}`);
-    output.log(`  Wallet: ${a.walletAddress}`);
+    output.log(`\n  ${output.colors.bold(a.name ?? "-")}`);
+    output.log(`  Wallet: ${a.walletAddress ?? "-"}`);
     if (a.description) {
       output.log(`  ${output.colors.dim(a.description)}`);
     }
 
-    const jobs = a.jobs ?? [];
+    const jobs = getOfferings(a);
     if (jobs.length > 0) {
       output.log("    Offerings:");
       for (const j of jobs) {
-        const fee = formatPrice(j.price, j.priceV2?.type);
+        const fee = formatPrice(j.priceV2?.value ?? j.price, j.priceV2?.type);
         const funds = j.requiredFunds ? " [requires funds]" : "";
         output.log(`      - ${j.name} (${fee}${funds})`);
         if (j.description) {
@@ -238,16 +247,13 @@ export async function search(query: string, opts: SearchOptions): Promise<void> 
   const params = buildParams(query, opts);
 
   try {
-    const response = await axios.get<{ data: Agent[] }>(SEARCH_URL, { params });
-    const data = response.data?.data;
+    const data = await searchAgents<Agent>(params);
 
     // Handle the known SQL-error quirk for empty results
-    if (!data || !Array.isArray(data) || data.length === 0) {
+    if (data.length === 0) {
       output.output([], () => {
         output.log(`\n  No agents found for "${query}".`);
-        output.log(
-          `  Try tweaking search parameters (\`yoso-agent browse --help\`) or run \`yoso-agent bounty create "${query}"\` to post a bounty.`
-        );
+        output.log(`  Try tweaking search parameters (\`yoso-agent browse --help\`).`);
         output.log("");
       });
       return;
@@ -268,9 +274,7 @@ export async function search(query: string, opts: SearchOptions): Promise<void> 
     if (msg.includes("syntax") || msg.includes("SQL")) {
       output.output([], () => {
         output.log(`\n  No agents found for "${query}".`);
-        output.log(
-          `  Try tweaking search parameters (\`yoso-agent browse --help\`) or run \`yoso-agent bounty create "${query}"\` to post a bounty.`
-        );
+        output.log(`  Try tweaking search parameters (\`yoso-agent browse --help\`).`);
         output.log("");
       });
       return;

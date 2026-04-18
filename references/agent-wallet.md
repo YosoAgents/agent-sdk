@@ -32,7 +32,7 @@ yoso-agent wallet address --json
 
 **Error cases:**
 
-- `{"error":"Unauthorized"}` — API key is missing or invalid
+- `{"error":"Unauthorized"}` - API key is missing or invalid
 
 ---
 
@@ -51,9 +51,9 @@ yoso-agent wallet balance --json
 ```json
 [
   {
-    "network": "base-mainnet",
+    "network": "hyperevm",
     "tokenAddress": null,
-    "tokenBalance": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "tokenBalance": "0x0",
     "tokenMetadata": {
       "symbol": null,
       "decimals": null,
@@ -69,9 +69,9 @@ yoso-agent wallet balance --json
     ]
   },
   {
-    "network": "base-mainnet",
-    "tokenAddress": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
-    "tokenBalance": "0x0000000000000000000000000000000000000000000000000000000000004e20",
+    "network": "hyperevm",
+    "tokenAddress": "0xb88339CB7199b77E23DB6E890353E22632Ba630f",
+    "tokenBalance": "0x4e20",
     "tokenMetadata": {
       "decimals": 6,
       "logo": null,
@@ -93,7 +93,7 @@ yoso-agent wallet balance --json
 
 | Field           | Type           | Description                                                                  |
 | --------------- | -------------- | ---------------------------------------------------------------------------- |
-| `network`       | string         | Blockchain network (e.g., "base-mainnet")                                    |
+| `network`       | string         | Blockchain network (e.g., "hyperevm")                                        |
 | `tokenAddress`  | string \| null | Contract address of the token (null for native/base token)                   |
 | `tokenBalance`  | string         | Balance amount as a hex string                                               |
 | `tokenMetadata` | object         | Token metadata object (see below)                                            |
@@ -110,14 +110,14 @@ yoso-agent wallet balance --json
 
 **Error cases:**
 
-- `{"error":"Unauthorized"}` — API key is missing or invalid
-- `{"error":"Wallet not found"}` — Agent wallet does not exist
+- `{"error":"Unauthorized"}` - API key is missing or invalid
+- `{"error":"Wallet not found"}` - Agent wallet does not exist
 
 ---
 
-## 3. Get Topup URL
+## 3. Get Topup Instructions
 
-Get a URL to add funds to the current agent's wallet.
+Get funding instructions for the current agent's wallet.
 
 ### Command
 
@@ -130,18 +130,34 @@ yoso-agent wallet topup --json
 ```json
 {
   "walletAddress": "0x1234567890123456789012345678901234567890",
-  "url": "https://yoso.bet/topup?token=..."
+  "contractAddress": "0xb88339cb7199b77e23db6e890353e22632ba630f",
+  "chain": "HyperEVM",
+  "chainId": 999,
+  "symbol": "USDC",
+  "gasToken": "HYPE",
+  "explorerUrl": "https://hyperevmscan.io/address/0x1234567890123456789012345678901234567890",
+  "instructions": [
+    "Send USDC to 0x1234567890123456789012345678901234567890 on HyperEVM (chain ID 999)",
+    "Send a small amount of HYPE for gas fees"
+  ]
 }
 ```
 
 **Response fields:**
 
-| Field           | Type   | Description                             |
-| --------------- | ------ | --------------------------------------- |
-| `walletAddress` | string | The agent's wallet address on HyperEVM  |
-| `url`           | string | URL to visit to add funds to the wallet |
+| Field             | Type     | Description                                          |
+| ----------------- | -------- | ---------------------------------------------------- |
+| `walletAddress`   | string   | The agent's wallet address on HyperEVM               |
+| `url`             | string   | Optional hosted topup URL, when the API provides one |
+| `contractAddress` | string   | USDC contract address on HyperEVM                    |
+| `chain`           | string   | Chain name                                           |
+| `chainId`         | number   | Chain ID                                             |
+| `symbol`          | string   | Token symbol to send                                 |
+| `gasToken`        | string   | Native gas token                                     |
+| `explorerUrl`     | string   | Explorer URL for the agent wallet                    |
+| `instructions`    | string[] | Human-readable funding steps returned by the API     |
 
 **Error cases:**
 
-- `{"error":"Unauthorized"}` — API key is missing or invalid
-- `{"error":"Failed to get topup URL"}` — Failed to retrieve topup URL from API
+- `{"error":"Unauthorized"}` - API key is missing or invalid
+- `{"error":"Failed to get topup instructions"}` - Failed to retrieve funding instructions from API

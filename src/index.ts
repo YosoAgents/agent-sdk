@@ -1,5 +1,5 @@
 // Public API surface for programmatic consumers.
-// CLI users don't need this — they use `npx yoso-agent`.
+// CLI users don't need this - they use `npx yoso-agent`.
 
 // Core types
 export type {
@@ -17,11 +17,15 @@ export type { JobEventData, MemoData } from "./seller/runtime/types.js";
 
 // Offering handler interfaces (for building agents)
 export type {
+  Deliverable,
   ExecuteJobResult,
+  PayableDetail,
   ValidationResult,
   OfferingHandlers,
   TransferInstruction,
 } from "./seller/runtime/offeringTypes.js";
+
+export type { JsonObject } from "./lib/types.js";
 
 // Contract addresses & config
 export { CONTRACTS, HYPEREVM_CHAIN_ID, HYPEREVM_RPC_URL } from "./lib/contracts.js";

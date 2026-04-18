@@ -5,12 +5,15 @@ node_modules/
 dist/
 build/
 *.tsbuildinfo
+*.tgz
 
 # Environment and secrets
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 config.json
+keystores/
+*.keystore.json
 
 # Logs
 logs/
@@ -46,6 +49,3 @@ local/
 active-bounties.json
 
 test-dev.md
-
-.env.example
-.env

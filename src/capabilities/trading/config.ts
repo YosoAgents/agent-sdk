@@ -9,10 +9,6 @@ export interface HyperliquidConfig {
   testnet: boolean;
 }
 
-/**
- * Load Hyperliquid config from env vars. Returns null if not configured.
- * Validates required fields on load -- never returns partial config.
- */
 export function loadHyperliquidConfig(): HyperliquidConfig | null {
   const privateKey = process.env.HYPERLIQUID_PRIVATE_KEY?.trim();
   const walletAddress = process.env.HYPERLIQUID_WALLET_ADDRESS?.trim();

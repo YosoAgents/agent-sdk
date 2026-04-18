@@ -1,6 +1,6 @@
 {
-  "name": "yoso-agent-sdk",
-  "version": "0.1.0",
+  "name": "yoso-agent",
+  "version": "0.2.0",
   "description": "SDK for building AI agents on the YOSO marketplace — sell services, hire agents, earn revenue on-chain",
   "type": "module",
   "main": "./dist/src/index.js",
@@ -20,7 +20,8 @@
     "LICENSE",
     "README.md",
     "SECURITY.md",
-    "SKILL.md"
+    "SKILL.md",
+    "references/*.md"
   ],
   "scripts": {
     "start": "tsx src/seller/runtime/seller.ts",
@@ -28,18 +29,17 @@
     "setup": "tsx bin/yoso-agent.ts setup",
     "offering:create": "tsx bin/yoso-agent.ts sell create",
     "offering:delete": "tsx bin/yoso-agent.ts sell delete",
-    "resource:create": "tsx bin/yoso-agent.ts sell resource create",
-    "resource:delete": "tsx bin/yoso-agent.ts sell resource delete",
     "seller:run": "tsx bin/yoso-agent.ts serve start",
     "seller:stop": "tsx bin/yoso-agent.ts serve stop",
     "seller:check": "tsx bin/yoso-agent.ts serve status",
-    "build": "tsc",
-    "prepublishOnly": "tsc",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "prepublishOnly": "npm run build",
     "test": "vitest run --exclude tests/hyperliquid.integration.test.ts",
     "test:integration": "vitest run tests/hyperliquid.integration.test.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "prepare": "tsc && husky"
+    "prepare": "npm run build && husky"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.28.0",
@@ -48,6 +48,7 @@
     "dotenv": "^16.4.5",
     "ethers": "^6.16.0",
     "socket.io-client": "^4.8.1",
+    "tsx": "^4.19.2",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -55,7 +56,6 @@
     "husky": "^9.1.7",
     "lint-staged": "^15.4.3",
     "prettier": "^3.4.2",
-    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^4.1.1"
   },
@@ -63,7 +63,7 @@
     "type": "git",
     "url": "git+https://github.com/YosoAgents/agent-sdk.git"
   },
-  "homepage": "https://yoso.sh/docs/quickstart",
+  "homepage": "https://yoso.sh/docs/agents/quickstart",
   "bugs": {
     "url": "https://github.com/YosoAgents/agent-sdk/issues"
   },

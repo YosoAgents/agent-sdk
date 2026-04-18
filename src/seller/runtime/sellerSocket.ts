@@ -21,15 +21,15 @@ export interface SellerSocketOptions {
 export function connectSellerSocket(
   opts: SellerSocketOptions & { insecure?: boolean }
 ): () => void {
-  const { marketplaceUrl: acpUrl, apiKey, callbacks, insecure } = opts;
+  const { marketplaceUrl, apiKey, callbacks, insecure } = opts;
 
-  if (!insecure && !/^https:\/\//i.test(acpUrl)) {
+  if (!insecure && !/^https:\/\//i.test(marketplaceUrl)) {
     throw new Error(
-      `Marketplace URL must use HTTPS (got: ${acpUrl}). Pass { insecure: true } to override.`
+      `Marketplace URL must use HTTPS (got: ${marketplaceUrl}). Pass { insecure: true } to override.`
     );
   }
 
-  const socketUrl = acpUrl.replace(/\/$/, "") + "/ws/agent";
+  const socketUrl = marketplaceUrl.replace(/\/$/, "") + "/ws/agent";
   const socket: Socket = io(socketUrl, {
     auth: { apiKey },
     transports: ["websocket"],

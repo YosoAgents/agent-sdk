@@ -1,6 +1,6 @@
 import type { ExecuteJobResult, ValidationResult } from "../../../runtime/offeringTypes.js";
 
-export async function executeJob(request: any): Promise<ExecuteJobResult> {
+export async function executeJob(request: Record<string, unknown>): Promise<ExecuteJobResult> {
   return {
     deliverable: JSON.stringify({
       echo: request,
@@ -11,10 +11,10 @@ export async function executeJob(request: any): Promise<ExecuteJobResult> {
   };
 }
 
-export function validateRequirements(request: any): ValidationResult {
+export function validateRequirements(_request: Record<string, unknown>): ValidationResult {
   return { valid: true };
 }
 
-export function requestPayment(request: any): string {
+export function requestPayment(_request: Record<string, unknown>): string {
   return "Echo test accepted";
 }

@@ -1,4 +1,5 @@
 import client from "./client.js";
+import type { JsonObject } from "./types.js";
 
 export interface PriceV2 {
   type: "fixed" | "percentage";
@@ -11,17 +12,16 @@ export interface JobOfferingData {
   priceV2: PriceV2;
   slaMinutes: number;
   requiredFunds: boolean;
-  requirement: Record<string, any>;
+  requirement: JsonObject;
   deliverable: string;
   resources?: Resource[];
-  subscriptionTiers?: string[];
 }
 
 export interface Resource {
   name: string;
   description: string;
   url: string;
-  params?: Record<string, any>;
+  params?: JsonObject;
 }
 
 export interface AgentData {
@@ -37,7 +37,17 @@ export interface CreateJobOfferingResponse {
 }
 
 export interface PaymentUrlResponse {
-  url: string;
+  url?: string;
+  contractAddress?: string;
+  chain?: string;
+  chainId?: number;
+  decimals?: number;
+  symbol?: string;
+  gasToken?: string;
+  rpcUrl?: string;
+  explorerUrl?: string;
+  agentWallet?: string;
+  instructions?: string[];
 }
 
 export interface NegotiationPhaseParams {
@@ -53,7 +63,7 @@ export async function createJobOffering(
       data: offering,
     });
     return { success: true, data };
-  } catch (error: any) {
+  } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`API createJobOffering failed: ${msg}`);
     return { success: false };
@@ -71,86 +81,15 @@ export async function deleteJobOffering(offeringName: string): Promise<{ success
   }
 }
 
-export async function upsertResourceApi(
-  resource: Resource
-): Promise<{ success: boolean; data?: AgentData }> {
-  try {
-    const { data } = await client.post(`/agents/resources`, {
-      data: resource,
-    });
-    return { success: true, data };
-  } catch (error: any) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`API upsertResource failed: ${msg}`);
-    return { success: false };
-  }
-}
-
-export async function deleteResourceApi(resourceName: string): Promise<{ success: boolean }> {
-  try {
-    await client.delete(`/agents/resources/${encodeURIComponent(resourceName)}`);
-    return { success: true };
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`API deleteResource failed: ${msg}`);
-    return { success: false };
-  }
-}
-
-export async function createSubscription(tier: {
-  name: string;
-  price: number;
-  duration: number;
-}): Promise<{
-  success: boolean;
-  data?: { id: number; name: string; price: number; duration: number };
-}> {
-  try {
-    const { data } = await client.post(`/agents/subscriptions`, tier);
-    return { success: true, data: data.data };
-  } catch (error: any) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`API createSubscription failed: ${msg}`);
-    return { success: false };
-  }
-}
-
-export async function updateSubscription(
-  name: string,
-  updates: { price?: number; duration?: number }
-): Promise<{
-  success: boolean;
-  data?: { id: number; name: string; price: number; duration: number };
-}> {
-  try {
-    const { data } = await client.put(`/agents/subscriptions/${encodeURIComponent(name)}`, updates);
-    return { success: true, data: data.data };
-  } catch (error: any) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`API updateSubscription failed: ${msg}`);
-    return { success: false };
-  }
-}
-
-export async function deleteSubscription(name: string): Promise<{ success: boolean }> {
-  try {
-    await client.delete(`/agents/subscriptions/${encodeURIComponent(name)}`);
-    return { success: true };
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : String(error);
-    console.error(`API deleteSubscription failed: ${msg}`);
-    return { success: false };
-  }
-}
-
 export async function getPaymentUrl(): Promise<{
   success: boolean;
   url?: string;
+  data?: PaymentUrlResponse;
 }> {
   try {
     const { data } = await client.get<{ data: PaymentUrlResponse }>("/agents/topup");
-    return { success: true, url: data.data.url };
-  } catch (error: any) {
+    return { success: true, url: data.data.url, data: data.data };
+  } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     console.error(`API getPaymentUrl failed: ${msg}`);
     return { success: false };

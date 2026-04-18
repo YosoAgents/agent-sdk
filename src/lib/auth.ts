@@ -1,10 +1,25 @@
 import axios, { type AxiosInstance } from "axios";
+import http from "http";
+import https from "https";
 import * as output from "./output.js";
 import { openUrl } from "./open.js";
 import { readConfig, writeConfig, type AgentEntry } from "./config.js";
 import client from "./client.js";
+import { isSessionTokenLocallyFresh } from "./session-token.js";
 
-const API_URL = process.env.YOSO_AUTH_URL || "https://yoso.bet";
+function authBaseUrl(): string {
+  if (process.env.YOSO_AUTH_URL?.trim()) {
+    return process.env.YOSO_AUTH_URL.trim().replace(/\/$/, "");
+  }
+
+  if (process.env.YOSO_API_URL?.trim()) {
+    return process.env.YOSO_API_URL.trim()
+      .replace(/\/api\/?$/, "")
+      .replace(/\/$/, "");
+  }
+
+  return "https://yoso.bet";
+}
 
 export interface AuthUrlResponse {
   authUrl: string;
@@ -15,14 +30,14 @@ export interface AuthStatusResponse {
   token: string;
 }
 
-/** Returned by list agents — no API key (never exposed after creation). */
+/** Returned by list agents - no API key (never exposed after creation). */
 export interface AgentInfoResponse {
   id: string;
   name: string;
   walletAddress: string;
 }
 
-/** Returned by create agent — API key + wallet private key shown once. */
+/** Returned by create agent - API key + wallet private key shown once. */
 export interface AgentKeyResponse {
   id: string;
   name: string;
@@ -31,40 +46,26 @@ export interface AgentKeyResponse {
   walletPrivateKey: string;
 }
 
-/** Returned by regenerate — fresh API key for an existing agent. */
+/** Returned by regenerate - fresh API key for an existing agent. */
 export interface RegenerateKeyResponse {
   apiKey: string;
 }
 
-function apiClient(): AxiosInstance {
-  return axios.create({
-    baseURL: API_URL,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
-function apiClientWithSession(sessionToken: string): AxiosInstance {
-  return axios.create({
-    baseURL: API_URL,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${sessionToken}`,
-    },
-  });
-}
-
-const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-/** Decode exp/iat claims from a JWT without verifying the signature. */
-function getJwtClaims(token: string): { exp?: number; iat?: number } | null {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    // @ts-ignore
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString());
-  } catch {
-    return null;
+function createAuthClient(sessionToken?: string | null): AxiosInstance {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (sessionToken) {
+    headers.Authorization = `Bearer ${sessionToken}`;
   }
+
+  return axios.create({
+    baseURL: authBaseUrl(),
+    headers,
+    proxy: false,
+    httpAgent: new http.Agent({ family: 4 }),
+    httpsAgent: new https.Agent({ family: 4 }),
+  });
 }
 
 export function getValidSessionToken(): string | null {
@@ -72,30 +73,23 @@ export function getValidSessionToken(): string | null {
   const token = config?.SESSION_TOKEN?.token;
   if (!token) return null;
 
-  const claims = getJwtClaims(token);
-  if (!claims?.exp) return null;
-
-  const now = Date.now();
-  if (claims.exp * 1000 <= now) return null;
-
-  // Reject tokens older than 24h regardless of exp
-  if (claims.iat && now - claims.iat * 1000 > MAX_SESSION_AGE_MS) return null;
-
-  return token;
+  return isSessionTokenLocallyFresh(token) ? token : null;
 }
 
-export function storeSessionToken(token: string): void {
+function storeSessionToken(token: string): void {
   const config = readConfig();
   writeConfig({ ...config, SESSION_TOKEN: { token } });
 }
 
-export async function getAuthUrl(): Promise<AuthUrlResponse> {
-  const { data } = await apiClient().get<{ data: AuthUrlResponse }>("/api/auth/lite/auth-url");
+async function getAuthUrl(): Promise<AuthUrlResponse> {
+  const { data } = await createAuthClient().get<{ data: AuthUrlResponse }>(
+    "/api/auth/lite/auth-url"
+  );
   return data.data;
 }
 
-export async function getAuthStatus(requestId: string): Promise<AuthStatusResponse | null> {
-  const { data } = await apiClient().get<{ data: AuthStatusResponse }>(
+async function getAuthStatus(requestId: string): Promise<AuthStatusResponse | null> {
+  const { data } = await createAuthClient().get<{ data: AuthStatusResponse }>(
     `/api/auth/lite/auth-status?requestId=${requestId}`
   );
   return data?.data ?? null;
@@ -103,44 +97,78 @@ export async function getAuthStatus(requestId: string): Promise<AuthStatusRespon
 
 /** Fetch all agents belonging to the authenticated user. No API keys returned. */
 export async function fetchAgents(sessionToken: string): Promise<AgentInfoResponse[]> {
-  const { data } = await apiClientWithSession(sessionToken).get<{
+  const { data } = await createAuthClient(sessionToken).get<{
     data: AgentInfoResponse[];
   }>("/api/agents/lite");
   return data.data;
 }
 
+interface CreateAgentApiResponse {
+  agent?: {
+    id?: unknown;
+    name?: unknown;
+    walletAddress?: unknown;
+  };
+  apiKey?: unknown;
+  walletPrivateKey?: unknown;
+}
+
+function requireString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Create agent response did not include ${field}.`);
+  }
+  return value;
+}
+
 /** Create a new agent for the authenticated user. API key + wallet private key returned once. */
 export async function createAgentApi(
-  sessionToken: string,
+  sessionToken: string | null,
   agentName: string
 ): Promise<AgentKeyResponse> {
-  const { data } = await apiClientWithSession(sessionToken).post<AgentKeyResponse>(
+  const { data } = await createAuthClient(sessionToken).post<CreateAgentApiResponse>(
     "/api/agents/register",
     { name: agentName.trim() }
   );
-  // Backend returns { agent: { id, name, walletAddress }, apiKey, walletPrivateKey }
-  const resp = data as unknown as {
-    agent: { id: string; name: string; walletAddress: string };
-    apiKey: string;
-    walletPrivateKey: string;
-  };
+  const agent = data.agent;
   return {
-    id: resp.agent.id,
-    name: resp.agent.name,
-    walletAddress: resp.agent.walletAddress,
-    apiKey: resp.apiKey,
-    walletPrivateKey: resp.walletPrivateKey,
+    id: requireString(agent?.id, "agent.id"),
+    name: requireString(agent?.name, "agent.name"),
+    walletAddress: requireString(agent?.walletAddress, "agent.walletAddress"),
+    apiKey: requireString(data.apiKey, "apiKey"),
+    walletPrivateKey: requireString(data.walletPrivateKey, "walletPrivateKey"),
   };
 }
 
 export async function regenerateApiKey(
-  sessionToken: string,
+  _sessionToken: string | null,
   walletAddress: string
 ): Promise<RegenerateKeyResponse> {
-  const { data } = await apiClientWithSession(sessionToken).post<{
-    data: RegenerateKeyResponse;
-  }>(`/api/agents/lite/${walletAddress}/regenerate-api`);
-  return data.data;
+  const config = readConfig();
+  const agentKey = config.agents?.find(
+    (a) => a.walletAddress.toLowerCase() === walletAddress.toLowerCase()
+  )?.apiKey;
+  const apiKey = agentKey || config.YOSO_AGENT_API_KEY;
+  if (!apiKey) {
+    throw new Error("No saved API key for this agent. Re-run setup or create a new agent.");
+  }
+
+  const { data } = await createAuthClient().post<{
+    data?: RegenerateKeyResponse;
+    apiKey?: string;
+  }>(
+    "/api/agents/register/regenerate",
+    {},
+    {
+      headers: {
+        "x-api-key": apiKey,
+      },
+    }
+  );
+  const key = data.data?.apiKey ?? data.apiKey;
+  if (!key) {
+    throw new Error("Regenerate API key response did not include apiKey.");
+  }
+  return { apiKey: key };
 }
 
 export async function isAgentApiKeyValid(apiKey: string): Promise<boolean> {
@@ -164,18 +192,37 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Login flow. Opens browser / prints link, then polls until authenticated
- * or timed out. No stdin interaction required — works in any runtime.
- */
-export async function interactiveLogin(): Promise<void> {
-  let auth: AuthUrlResponse;
-  try {
-    auth = await getAuthUrl();
-  } catch (e) {
-    output.fatal(`Could not get login link: ${e instanceof Error ? e.message : String(e)}`);
+async function pollForSessionToken(requestId: string): Promise<string | null> {
+  const deadline = Date.now() + AUTH_TIMEOUT_MS;
+  let elapsed = 0;
+
+  while (Date.now() < deadline) {
+    await sleep(AUTH_POLL_INTERVAL_MS);
+    elapsed += AUTH_POLL_INTERVAL_MS;
+
+    let status: AuthStatusResponse | null = null;
+    try {
+      status = await getAuthStatus(requestId);
+    } catch {
+      // Auth not ready yet or transient error - keep polling
+    }
+    if (status?.token) {
+      storeSessionToken(status.token);
+      return status.token;
+    }
+
+    // Progress indicator every 15s (3 polls)
+    if (elapsed % 15_000 === 0) {
+      const remaining = Math.round((deadline - Date.now()) / 1_000);
+      output.log(`  Still waiting... (${remaining}s remaining)`);
+    }
   }
 
+  return null;
+}
+
+async function openAuthRequest(): Promise<AuthUrlResponse> {
+  const auth = await getAuthUrl();
   const { authUrl, requestId } = auth;
   openUrl(authUrl);
 
@@ -192,63 +239,71 @@ export async function interactiveLogin(): Promise<void> {
     }
   );
 
-  const deadline = Date.now() + AUTH_TIMEOUT_MS;
-  let elapsed = 0;
-
-  while (Date.now() < deadline) {
-    await sleep(AUTH_POLL_INTERVAL_MS);
-    elapsed += AUTH_POLL_INTERVAL_MS;
-
-    try {
-      const status = await getAuthStatus(requestId);
-      if (status?.token) {
-        storeSessionToken(status.token);
-        output.output(
-          {
-            status: "authenticated",
-            message: "Login success. Session stored.",
-          },
-          () => output.success("Login success. Session stored.\n")
-        );
-        return;
-      }
-    } catch (err) {
-      // Auth not ready yet or transient error — keep polling
-    }
-
-    // Progress indicator every 15s (3 polls)
-    if (elapsed % 15_000 === 0) {
-      const remaining = Math.round((deadline - Date.now()) / 1_000);
-      output.log(`  Still waiting... (${remaining}s remaining)`);
-    }
-  }
-
-  output.fatal(
-    `Authentication timed out after ${AUTH_TIMEOUT_MS / 1_000}s. Run \`yoso-agent login\` to try again.`
-  );
+  return { authUrl, requestId };
 }
 
 /**
- * Ensure we have a valid session token. If expired/missing, auto-prompts login.
- * Returns the valid session token, or calls process.exit if login fails.
+ * Login flow. Opens browser / prints link, then polls until authenticated
+ * or timed out. No stdin interaction required - works in any runtime.
  */
-export async function ensureSession(): Promise<string> {
+export async function interactiveLogin(): Promise<void> {
+  let auth: AuthUrlResponse;
+  try {
+    auth = await openAuthRequest();
+  } catch (e) {
+    output.fatal(`Could not get login link: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const token = await pollForSessionToken(auth.requestId);
+  if (!token) {
+    output.fatal(
+      `Authentication timed out after ${AUTH_TIMEOUT_MS / 1_000}s. Run \`yoso-agent login\` to try again.`
+    );
+  }
+
+  output.output(
+    {
+      status: "authenticated",
+      message: "Login success. Session stored.",
+    },
+    () => output.success("Login success. Session stored.\n")
+  );
+}
+
+/** Start browser auth when available; return null when setup can continue without it. */
+export async function ensureSessionIfAvailable(): Promise<string | null> {
   const existing = getValidSessionToken();
   if (existing) return existing;
 
-  output.warn("Session expired or not found. Logging in...\n");
-  await interactiveLogin();
-
-  const token = getValidSessionToken();
-  if (!token) {
-    output.fatal("Login failed. Cannot continue.");
+  let auth: AuthUrlResponse;
+  try {
+    auth = await openAuthRequest();
+  } catch (e) {
+    output.warn(
+      `Browser login is unavailable (${e instanceof Error ? e.message : String(e)}). ` +
+        "Continuing with direct agent registration.\n"
+    );
+    return null;
   }
-  return token;
+
+  const token = await pollForSessionToken(auth.requestId);
+  if (token) {
+    output.output(
+      {
+        status: "authenticated",
+        message: "Login success. Session stored.",
+      },
+      () => output.success("Login success. Session stored.\n")
+    );
+    return token;
+  }
+
+  output.warn("Authentication timed out. Continuing with direct agent registration.\n");
+  return null;
 }
 
 /**
  * Merge server agents into local config. Returns the merged list.
- * Server does NOT return API keys — only id, name, walletAddress.
+ * Server does NOT return API keys - only id, name, walletAddress.
  * Local API keys (from create/regenerate) are preserved.
  */
 export function syncAgentsToConfig(serverAgents: AgentInfoResponse[]): AgentEntry[] {
@@ -267,7 +322,6 @@ export function syncAgentsToConfig(serverAgents: AgentInfoResponse[]): AgentEntr
       name: s.name,
       walletAddress: s.walletAddress,
       apiKey: local?.apiKey, // preserve local key if we have one
-      walletPrivateKey: local?.walletPrivateKey, // preserve local private key
       active: local?.active ?? false,
     };
   });

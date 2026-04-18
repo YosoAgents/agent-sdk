@@ -7,7 +7,7 @@ export const CONTRACTS = {
   USDC: "0xb88339CB7199b77E23DB6E890353E22632Ba630f",
 } as const;
 
-// Minimal ABIs — only what the SDK needs
+// Minimal ABIs - only what the SDK needs
 
 export const YOSO_ROUTER_ABI = [
   // Job management

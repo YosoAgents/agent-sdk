@@ -18,6 +18,6 @@ export function openUrl(url: string): void {
   }
 
   execFile(bin, args, () => {
-    // Silently fail — the URL is always printed as fallback
+    // Callers print the URL, so browser launch errors are non-fatal.
   });
 }

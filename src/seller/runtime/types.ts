@@ -1,3 +1,5 @@
+import type { JsonObject } from "../../lib/types.js";
+
 export enum JobPhase {
   REQUEST = 0,
   NEGOTIATION = 1,
@@ -41,7 +43,7 @@ export interface JobEventData {
   evaluatorAddress: string;
   price: number;
   memos: MemoData[];
-  context: Record<string, any>;
+  context: JsonObject;
   createdAt?: string;
   /** The memo id the seller is expected to sign (if any). */
   memoToSign?: number;
@@ -53,6 +55,7 @@ export interface SignMemoRequestData {
   memoId: string; // on-chain memo ID
   onChainJobId: string;
   type?: "escrow" | "completion"; // defaults to 'escrow' for backwards compat
+  nextPhase?: JobPhase;
 }
 
 /** Socket event names used by the marketplace backend. */

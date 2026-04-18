@@ -1,9 +1,18 @@
 #!/usr/bin/env node
 
+import { config as dotenvConfig } from "dotenv";
 import { readFileSync } from "fs";
-import { setJsonMode } from "../src/lib/output.js";
+import * as path from "path";
+import { ROOT } from "../src/lib/paths.js";
+// Load .env from ROOT (honors YOSO_AGENT_ROOT) before any module that reads the env
+// lazily from process.env (client.ts's own dotenv.config() runs later as a no-op).
+dotenvConfig({ path: path.resolve(ROOT, ".env") });
+
+import { fatal, setJsonMode } from "../src/lib/output.js";
 import { requireApiKey } from "../src/lib/config.js";
 import { SEARCH_DEFAULTS } from "../src/commands/search.js";
+import { parseRequirementsJson } from "../src/mcp/validation.js";
+import type { JsonObject } from "../src/lib/types.js";
 
 const VERSION = (() => {
   for (const rel of ["../package.json", "../../package.json"]) {
@@ -70,6 +79,7 @@ function buildHelp(): string {
     `  ${dim("Usage:")}  ${bold("yoso-agent")} ${dim("<command> [subcommand] [args] [flags]")}`,
     "",
     section("Getting Started"),
+    cmd("init", "Install YOSO Agent skill for AI assistants"),
     cmd("setup", "Interactive setup (login + create agent)"),
     cmd("login", "Re-authenticate session"),
     cmd("whoami", "Show current agent profile summary"),
@@ -83,7 +93,7 @@ function buildHelp(): string {
     section("Wallet"),
     cmd("wallet address", "Get agent wallet address"),
     cmd("wallet balance", "Get all token balances"),
-    cmd("wallet topup", "Get topup URL to add funds"),
+    cmd("wallet topup", "Get funding instructions"),
     "",
     section("Profile"),
     cmd("profile show", "Show full agent profile"),
@@ -99,7 +109,6 @@ function buildHelp(): string {
     "",
     cmd("job create <wallet> <offering>", "Start a job with an agent"),
     flag("--requirements '<json>'", "Service requirements (JSON)"),
-    flag("--subscription '<tierName>'", "Preferred subscription tier"),
     flag("--isAutomated <true|false>", "Payment review (default: false). Set true to auto-pay"),
     cmd("job status <job-id>", "Check job status"),
     cmd("job pay <job-id>", "Accept or reject payment for a job"),
@@ -110,18 +119,6 @@ function buildHelp(): string {
     flag("--reason '<text>'", "Optional reason"),
     cmd("job active [page] [pageSize]", "List active jobs"),
     cmd("job completed [page] [pageSize]", "List completed jobs"),
-    cmd("bounty create [query]", "Create a new bounty (interactive or flags)"),
-    flag("--title <text>", "Bounty title"),
-    flag("--description <text>", "Bounty description"),
-    flag("--budget <number>", "Budget in USD"),
-    flag("--category <digital|physical>", "Category (default: digital)"),
-    flag("--tags <csv>", "Comma-separated tags"),
-    cmd("bounty poll", "Poll all active bounties (cron-safe)"),
-    cmd("bounty list", "List active local bounties"),
-    cmd("bounty status <bounty-id>", "Get bounty details from server"),
-    cmd("bounty select <bounty-id>", "Select candidate and create job"),
-    cmd("bounty update <bounty-id>", "Update an open bounty"),
-    cmd("bounty cancel <bounty-id>", "Cancel a bounty"),
     "",
     cmd("resource query <url>", "Query an agent's resource by URL"),
     flag("--params '<json>'", "Parameters for the resource (JSON)"),
@@ -133,15 +130,6 @@ function buildHelp(): string {
     cmd("sell list", "Show all offerings with status"),
     cmd("sell inspect <offering-name>", "Detailed view of an offering"),
     "",
-    cmd("sell sub list", "List subscription tiers"),
-    cmd("sell sub create <name> <price> <dur>", "Create a subscription tier"),
-    cmd("sell sub delete <name>", "Delete a subscription tier"),
-    "",
-    cmd("sell resource init <resource-name>", "Scaffold a new resource"),
-    cmd("sell resource create <resource-name>", "Register resource on marketplace"),
-    cmd("sell resource delete <resource-name>", "Delete resource from marketplace"),
-    cmd("sell resource list", "Show all resources with status"),
-    "",
     section("Seller Runtime"),
     cmd("serve start", "Start the seller runtime"),
     cmd("serve stop", "Stop the seller runtime"),
@@ -151,20 +139,6 @@ function buildHelp(): string {
     flag("--offering <name>", "Filter logs by offering name"),
     flag("--job <id>", "Filter logs by job ID"),
     flag("--level <level>", "Filter logs by level (e.g. error)"),
-    "",
-    section("Cloud Deployment"),
-    cmd("serve deploy railway", "Deploy seller runtime to Railway"),
-    cmd("serve deploy railway setup", "First-time Railway project setup"),
-    cmd("serve deploy railway status", "Show remote deployment status"),
-    cmd("serve deploy railway logs", "Show remote deployment logs"),
-    flag("--follow, -f", "Tail logs in real time"),
-    flag("--offering <name>", "Filter logs by offering name"),
-    flag("--job <id>", "Filter logs by job ID"),
-    flag("--level <level>", "Filter logs by level (e.g. error)"),
-    cmd("serve deploy railway teardown", "Remove Railway deployment"),
-    cmd("serve deploy railway env", "List env vars on Railway"),
-    cmd("serve deploy railway env set", "Set env var (KEY=value)"),
-    cmd("serve deploy railway env delete", "Delete an env var"),
     "",
     section("Flags"),
     flag("--json", "Output raw JSON (for agents/scripts)"),
@@ -183,9 +157,22 @@ function buildCommandHelp(command: string): string | undefined {
         `  ${bold("yoso-agent setup")} ${dim("— Interactive setup")}`,
         "",
         `  ${dim("Guides you through:")}`,
-        `    1. Login to yoso.bet`,
+        `    1. Connect to YOSO`,
         `    2. Select or create an agent`,
-        `    3. Optionally launch an agent token`,
+        `    3. Confirm profile and optional marketplace prompt`,
+        "",
+        `  ${dim("Non-interactive:")}`,
+        `    yoso-agent setup --name my-agent --yes`,
+        "",
+        flag("--name <agent-name>", "Create and activate an agent without prompts"),
+        flag("--agent-name <agent-name>", "Alias for --name"),
+        flag("--yes, -y", "Skip optional setup prompts"),
+        flag("--skip-system-prompt", "Skip optional system prompt paragraph"),
+        flag("--no-system-prompt", "Alias for --skip-system-prompt"),
+        flag("--keystore", "Encrypt wallet key to a password-protected keystore (TTY required)"),
+        "",
+        `  ${dim("Default: wallet key is written to .env (gitignored).")}`,
+        `  ${dim("Use --keystore for encrypted-at-rest storage on a shared host.")}`,
         "",
       ].join("\n"),
 
@@ -255,7 +242,6 @@ function buildCommandHelp(command: string): string | undefined {
         "",
         cmd("create <wallet> <offering>", "Start a job with an agent"),
         flag("--requirements '<json>'", "Service requirements (JSON)"),
-        flag("--subscription '<tierName>'", "Preferred subscription tier"),
         flag("--isAutomated <true|false>", "Payment review (default: false). Set true to auto-pay"),
         `    ${dim(
           'Example: yoso-agent job create 0x1234 "Execute Trade" --requirements \'{"pair":"ETH/USDC"}\''
@@ -277,36 +263,18 @@ function buildCommandHelp(command: string): string | undefined {
     bounty: () =>
       [
         "",
-        `  ${bold("yoso-agent bounty")} ${dim("— Manage local bounty lifecycle")}`,
+        `  ${bold("yoso-agent bounty")} ${dim("- not part of the public release")}`,
         "",
-        cmd("create [query]", "Create a bounty (interactive or via flags)"),
-        `    ${dim('Interactive:  yoso-agent bounty create "video production"')}`,
-        `    ${dim('With flags:   yoso-agent bounty create --title "Music video" --description "Cute girl dancing animation for my song" --budget 50 --tags "video,music" --category digital --source-channel telegram --json')}`,
+        `  ${dim("Use yoso-agent browse to find agents, then yoso-agent job create to hire one.")}`,
         "",
-        flag(
-          "--title <text>",
-          "Bounty title (triggers non-interactive mode, also used for update)"
-        ),
-        flag("--description <text>", "Description (defaults to title, also used for update)"),
-        flag("--budget <number>", "Budget in USD (also used for update)"),
-        flag("--category <digital|physical>", "Category (default: digital)"),
-        flag("--tags <csv>", "Comma-separated tags (also used for update)"),
-        flag("--source-channel <name>", "Channel where bounty originated (e.g. telegram, webchat)"),
-        flag("--json", "Output result in JSON format (for create)"),
+      ].join("\n"),
+
+    token: () =>
+      [
         "",
-        cmd("poll", "Poll all active bounties and update local state"),
-        cmd("list", "List active local bounties"),
-        cmd("status <bounty-id>", "Get bounty details from server"),
-        flag("--sync", "Sync job status with backend before fetching details"),
-        cmd("select <bounty-id>", "Pick pending_match candidate, create job, confirm match"),
-        cmd("update <bounty-id>", "Update an open bounty"),
-        flag("--title <text>", "New title (for update)"),
-        flag("--description <text>", "New description (for update)"),
-        flag("--budget <number>", "New budget in USD (for update)"),
-        flag("--tags <csv>", "New tags (for update)"),
+        `  ${bold("yoso-agent token")} ${dim("- not part of the current public CLI")}`,
         "",
-        cmd("cancel <bounty-id>", "Cancel a bounty (soft delete)"),
-        cmd("cleanup <bounty-id>", "Remove local bounty state"),
+        `  ${dim("Use yoso-agent profile show to view token status when available.")}`,
         "",
       ].join("\n"),
 
@@ -335,16 +303,6 @@ function buildCommandHelp(command: string): string | undefined {
         cmd("delete <offering-name>", "Delist offering from marketplace"),
         cmd("list", "Show all offerings with status"),
         cmd("inspect <offering-name>", "Detailed view of an offering"),
-        "",
-        cmd("sub list", "List subscription tiers"),
-        cmd("sub create <name> <price> <duration>", "Create a subscription tier"),
-        `    ${dim("Example: yoso-agent sell sub create premium 10 30  (10 USDC for 30 days)")}`,
-        cmd("sub delete <name>", "Delete a subscription tier"),
-        "",
-        cmd("resource init <resource-name>", "Scaffold a new resource"),
-        cmd("resource create <resource-name>", "Register resource on marketplace"),
-        cmd("resource delete <resource-name>", "Delete resource from marketplace"),
-        cmd("resource list", "Show all resources with status"),
         "",
         `  ${dim("Workflow:")}`,
         `    yoso-agent sell init my_service`,
@@ -384,41 +342,17 @@ function buildCommandHelp(command: string): string | undefined {
         flag("--job <id>", "Filter logs by job ID"),
         flag("--level <level>", "Filter logs by level (e.g. error)"),
         "",
-        cmd("deploy railway", "Deploy seller runtime to Railway"),
-        cmd("deploy railway setup", "First-time Railway project setup"),
-        cmd("deploy railway status", "Show remote deployment status"),
-        cmd("deploy railway logs", "Show remote deployment logs"),
-        flag("--follow, -f", "Tail logs in real time"),
-        flag("--offering <name>", "Filter logs by offering name"),
-        flag("--job <id>", "Filter logs by job ID"),
-        flag("--level <level>", "Filter logs by level (e.g. error)"),
-        cmd("deploy railway teardown", "Remove Railway deployment"),
-        cmd("deploy railway env", "List env vars on Railway"),
-        cmd("deploy railway env set KEY=val", "Set an env var"),
-        cmd("deploy railway env delete KEY", "Delete an env var"),
+        `  ${dim("For hosted operation, run the same project under your own process manager.")}`,
         "",
       ].join("\n"),
 
     deploy: () =>
       [
         "",
-        `  ${bold("yoso-agent serve deploy")} ${dim("— Deploy seller runtime to the cloud")}`,
+        `  ${bold("yoso-agent serve deploy")} ${dim("- Provider-managed hosting is not part of the public CLI")}`,
         "",
-        `  ${dim("Workflow:")}`,
-        `    yoso-agent serve deploy railway setup    ${dim("# First-time setup")}`,
-        `    yoso-agent sell init my_service          ${dim("# Create offering")}`,
-        `    yoso-agent sell create my_service        ${dim("# Register on marketplace")}`,
-        `    yoso-agent serve deploy railway          ${dim("# Deploy to Railway")}`,
-        "",
-        `  ${dim("Management:")}`,
-        `    yoso-agent serve deploy railway status       ${dim("# Check deployment")}`,
-        `    yoso-agent serve deploy railway logs -f      ${dim("# Tail logs")}`,
-        `    yoso-agent serve deploy railway teardown     ${dim("# Remove deployment")}`,
-        "",
-        `  ${dim("Environment Variables:")}`,
-        `    yoso-agent serve deploy railway env              ${dim("# List env vars")}`,
-        `    yoso-agent serve deploy railway env set KEY=val  ${dim("# Set an env var")}`,
-        `    yoso-agent serve deploy railway env delete KEY   ${dim("# Delete an env var")}`,
+        `  ${dim("Use yoso-agent serve start locally, or run that command under infrastructure you choose.")}`,
+        `  ${dim("YOSO does not require a specific hosting provider.")}`,
         "",
       ].join("\n"),
   };
@@ -457,9 +391,23 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === "init") {
+    const { init } = await import("../src/commands/init.js");
+    const forceFlag = hasFlag(args, "--force");
+    return init(forceFlag);
+  }
+
   if (command === "setup") {
     const { setup } = await import("../src/commands/setup.js");
-    return setup();
+    const setupArgs = [subcommand, ...rest].filter(Boolean);
+    const yes = hasFlag(setupArgs, "--yes", "-y");
+    const agentName = getFlagValue(setupArgs, "--name") ?? getFlagValue(setupArgs, "--agent-name");
+    const useKeystore = hasFlag(setupArgs, "--keystore");
+    return setup({
+      agentName,
+      skipSystemPrompt: yes || hasFlag(setupArgs, "--skip-system-prompt", "--no-system-prompt"),
+      useKeystore,
+    });
   }
 
   if (command === "login") {
@@ -475,7 +423,8 @@ async function main(): Promise<void> {
         console.error("Error: agent name required. Usage: yoso-agent agent create <name>");
         process.exit(1);
       }
-      return agent.create(rest[0]);
+      const useKeystore = hasFlag(rest, "--keystore");
+      return agent.create(rest[0], { useKeystore });
     }
     if (subcommand === "switch") {
       const walletAddr = getFlagValue(rest, "--wallet");
@@ -534,6 +483,49 @@ async function main(): Promise<void> {
     });
   }
 
+  if (command === "serve" && subcommand === "deploy") {
+    console.log(buildCommandHelp("deploy"));
+    return;
+  }
+
+  if (command === "bounty") {
+    console.error(
+      "Error: bounty workflows are not part of the public release. Use yoso-agent browse and yoso-agent job create."
+    );
+    process.exit(1);
+  }
+
+  if (command === "token") {
+    fatal(
+      "token launch/info commands are not part of the current public CLI. Use yoso-agent profile show to view token status."
+    );
+  }
+
+  if (
+    command === "job" &&
+    subcommand === "create" &&
+    (hasFlag(rest, "--subscription") || getFlagValue(rest, "--subscription"))
+  ) {
+    console.error(
+      "Error: --subscription is not supported by the public YOSO backend yet. Create a normal job without this flag."
+    );
+    process.exit(1);
+  }
+
+  if (command === "sell" && subcommand === "sub") {
+    console.error(
+      "Error: subscription tiers are not supported by the public YOSO backend yet. Use standard per-job pricing in offering.json."
+    );
+    process.exit(1);
+  }
+
+  if (command === "sell" && subcommand === "resource") {
+    console.error(
+      "Error: standalone resource registration is not supported. Add resources to offering.json and run `yoso-agent sell create <offering-name>`."
+    );
+    process.exit(1);
+  }
+
   // All other commands need API key
   requireApiKey();
 
@@ -565,21 +557,19 @@ async function main(): Promise<void> {
         }
         let remaining = rest.slice(2);
         const reqJson = getFlagValue(remaining, "--requirements");
-        const subscriptionTier = getFlagValue(remaining, "--subscription") ?? undefined;
         remaining = removeFlagWithValue(remaining, "--requirements");
-        remaining = removeFlagWithValue(remaining, "--subscription");
 
         const isAutomatedStr = getFlagValue(remaining, "--isAutomated");
         remaining = removeFlagWithValue(remaining, "--isAutomated");
 
-        let requirements: Record<string, unknown> = {};
+        let requirements: JsonObject = {};
         if (reqJson) {
-          try {
-            requirements = JSON.parse(reqJson);
-          } catch {
-            console.error("Error: Invalid JSON in --requirements");
+          const parsedRequirements = parseRequirementsJson(reqJson);
+          if (!parsedRequirements.ok) {
+            console.error(`Error: ${parsedRequirements.error}`);
             process.exit(1);
           }
+          requirements = parsedRequirements.value;
         }
         let isAutomated = false;
         if (typeof isAutomatedStr === "string") {
@@ -594,7 +584,7 @@ async function main(): Promise<void> {
           }
         }
 
-        return job.create(walletAddr, offering, requirements, subscriptionTier, isAutomated);
+        return job.create(walletAddr, offering, requirements, isAutomated);
       }
       if (subcommand === "status") {
         if (!rest[0]) {
@@ -672,64 +662,6 @@ async function main(): Promise<void> {
       return;
     }
 
-    case "bounty": {
-      const bounty = await import("../src/commands/bounty.js");
-      if (subcommand === "create") {
-        // Check for structured flags (non-interactive mode)
-        const titleFlag = getFlagValue(rest, "--title");
-        const descFlag = getFlagValue(rest, "--description");
-        const budgetFlag = getFlagValue(rest, "--budget");
-        const categoryFlag = getFlagValue(rest, "--category");
-        const tagsFlag = getFlagValue(rest, "--tags");
-        const sourceChannelFlag = getFlagValue(rest, "--source-channel");
-
-        if (titleFlag || budgetFlag) {
-          // Non-interactive: all from flags
-          const budget = budgetFlag != null ? Number(budgetFlag) : undefined;
-          return bounty.create(undefined, {
-            title: titleFlag,
-            description: descFlag,
-            budget: Number.isFinite(budget) ? budget : undefined,
-            category: categoryFlag,
-            tags: tagsFlag,
-            sourceChannel: sourceChannelFlag,
-          });
-        }
-
-        // Interactive fallback: treat remaining positional args as query seed
-        const query = rest.filter((a) => a != null && !String(a).startsWith("-")).join(" ");
-        return bounty.create(query || undefined, {
-          sourceChannel: sourceChannelFlag,
-        });
-      }
-      if (subcommand === "update") {
-        const updateBountyId = rest[0];
-        const updateTitle = getFlagValue(rest, "--title");
-        const updateDesc = getFlagValue(rest, "--description");
-        const updateBudgetStr = getFlagValue(rest, "--budget");
-        const updateTags = getFlagValue(rest, "--tags");
-        const updateBudget = updateBudgetStr != null ? Number(updateBudgetStr) : undefined;
-        return bounty.update(updateBountyId, {
-          title: updateTitle,
-          description: updateDesc,
-          budget: Number.isFinite(updateBudget) ? updateBudget : undefined,
-          tags: updateTags,
-        });
-      }
-      if (subcommand === "poll") return bounty.poll();
-      if (subcommand === "list") return bounty.list();
-      if (subcommand === "status") {
-        const syncFlag = hasFlag(rest, "--sync");
-        const statusBountyId = rest.filter((a) => a !== "--sync")[0];
-        return bounty.status(statusBountyId, { sync: syncFlag });
-      }
-      if (subcommand === "select") return bounty.select(rest[0]);
-      if (subcommand === "cancel") return bounty.cancel(rest[0]);
-      if (subcommand === "cleanup") return bounty.cleanup(rest[0]);
-      console.log(buildCommandHelp("bounty"));
-      return;
-    }
-
     case "profile": {
       const profile = await import("../src/commands/profile.js");
       if (subcommand === "show") return profile.show();
@@ -750,29 +682,6 @@ async function main(): Promise<void> {
 
     case "sell": {
       const sell = await import("../src/commands/sell.js");
-      if (subcommand === "sub") {
-        const sub = await import("../src/commands/subscription.js");
-        const subSubcommand = rest[0];
-        if (subSubcommand === "list") return sub.list();
-        if (subSubcommand === "create") {
-          const name = rest[1];
-          const price = rest[2] != null ? Number(rest[2]) : undefined;
-          const duration = rest[3] != null ? Number(rest[3]) : undefined;
-          return sub.create(name, price, duration);
-        }
-        if (subSubcommand === "delete") return sub.del(rest[1]);
-        console.log(buildCommandHelp("sell"));
-        return;
-      }
-      if (subcommand === "resource") {
-        const resourceSubcommand = rest[0];
-        if (resourceSubcommand === "init") return sell.resourceInit(rest[1]);
-        if (resourceSubcommand === "create") return sell.resourceCreate(rest[1]);
-        if (resourceSubcommand === "delete") return sell.resourceDelete(rest[1]);
-        if (resourceSubcommand === "list") return sell.resourceList();
-        console.log(buildCommandHelp("sell"));
-        return;
-      }
       if (subcommand === "init") {
         if (!rest[0]) {
           console.error(
@@ -833,32 +742,6 @@ async function main(): Promise<void> {
         return serve.logs(hasFlag(rest, "--follow", "-f"), filter);
       }
       if (subcommand === "deploy") {
-        const deploy = await import("../src/commands/deploy.js");
-        const provider = rest[0];
-        if (provider === "railway") {
-          const providerSub = rest[1];
-          if (!providerSub) return deploy.deploy();
-          if (providerSub === "setup") return deploy.setup();
-          if (providerSub === "status") return deploy.status();
-          if (providerSub === "logs") {
-            const logsArgs = rest.slice(2);
-            const filter = {
-              offering: getFlagValue(logsArgs, "--offering"),
-              job: getFlagValue(logsArgs, "--job"),
-              level: getFlagValue(logsArgs, "--level"),
-            };
-            return deploy.logs(hasFlag(logsArgs, "--follow", "-f"), filter);
-          }
-          if (providerSub === "teardown") return deploy.teardown();
-          if (providerSub === "env") {
-            const envAction = rest[2];
-            if (!envAction) return deploy.env();
-            if (envAction === "set") return deploy.envSet(rest[3]);
-            if (envAction === "delete") return deploy.envDelete(rest[3]);
-            console.log(buildCommandHelp("deploy"));
-            return;
-          }
-        }
         console.log(buildCommandHelp("deploy"));
         return;
       }
@@ -875,14 +758,14 @@ async function main(): Promise<void> {
           process.exit(1);
         }
         const paramsJson = getFlagValue(rest, "--params");
-        let params: Record<string, any> | undefined;
+        let params: JsonObject | undefined;
         if (paramsJson) {
-          try {
-            params = JSON.parse(paramsJson);
-          } catch {
-            console.error("Error: Invalid JSON in --params");
+          const parsedParams = parseRequirementsJson(paramsJson);
+          if (!parsedParams.ok) {
+            console.error(`Error: ${parsedParams.error.replace("requirements", "params")}`);
             process.exit(1);
           }
+          params = parsedParams.value;
         }
         return resource.query(url, params);
       }

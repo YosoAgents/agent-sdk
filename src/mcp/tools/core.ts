@@ -1,11 +1,24 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import axios from "axios";
 import client from "../../lib/client.js";
 import { processNegotiationPhase } from "../../lib/api.js";
 import { getValidSessionToken, createAgentApi } from "../../lib/auth.js";
+import { searchAgents } from "../../lib/search-client.js";
+import { parseRequirementsJson } from "../validation.js";
 
-const SEARCH_URL = process.env.YOSO_SEARCH_URL || "https://yoso.bet/api/agents/search";
+interface CreateJobResponse {
+  data?: {
+    jobId?: number;
+  };
+  jobId?: number;
+}
+
+interface MarketplaceAgent {
+  name?: string;
+  walletAddress?: string;
+  jobs?: unknown[];
+  offerings?: unknown[];
+}
 
 function ok(data: unknown) {
   return {
@@ -20,7 +33,7 @@ function err(error: string) {
 }
 
 export function registerCoreTools(server: McpServer): void {
-  // 1. browse_agents — search marketplace for agents and offerings
+  // 1. browse_agents - search marketplace for agents and offerings
   server.tool(
     "browse_agents",
     "Search the YOSO marketplace for agents and offerings",
@@ -35,9 +48,8 @@ export function registerCoreTools(server: McpServer): void {
           yoso: "true",
           topK: String(limit ?? 5),
         };
-        const response = await axios.get<{ data: unknown[] }>(SEARCH_URL, { params });
-        const agents = response.data?.data;
-        if (!agents || !Array.isArray(agents) || agents.length === 0) {
+        const agents = await searchAgents<unknown>(params);
+        if (agents.length === 0) {
           return ok({ success: true, agents: [], message: `No agents found for "${query}"` });
         }
         return ok({ success: true, agents });
@@ -47,7 +59,7 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 2. hire_agent — create a job to hire an agent
+  // 2. hire_agent - create a job to hire an agent
   server.tool(
     "hire_agent",
     "Create a job to hire an agent for a specific offering",
@@ -58,24 +70,27 @@ export function registerCoreTools(server: McpServer): void {
         .describe("Agent wallet address"),
       offering_name: z.string().min(1).max(100).describe("Name of the offering"),
       requirements: z.string().max(10_000).optional().describe("Job requirements (JSON string)"),
+      auto_pay: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("Skip manual payment review. Defaults to false."),
     },
-    async ({ agent_wallet, offering_name, requirements }) => {
+    async ({ agent_wallet, offering_name, requirements, auto_pay }) => {
       try {
-        let serviceRequirements = {};
-        if (requirements) {
-          try {
-            serviceRequirements = JSON.parse(requirements);
-          } catch {
-            return err("Invalid JSON in requirements parameter");
-          }
-        }
-        const response = await client.post<{ data: { jobId: number } }>("/agents/jobs", {
+        const parsedRequirements = parseRequirementsJson(requirements);
+        if (!parsedRequirements.ok) return err(parsedRequirements.error);
+
+        const response = await client.post<CreateJobResponse>("/agents/jobs", {
           providerWalletAddress: agent_wallet,
           jobOfferingName: offering_name,
-          serviceRequirements,
-          isAutomated: true,
+          serviceRequirements: parsedRequirements.value,
+          isAutomated: auto_pay,
         });
-        const jobId = response.data.data?.jobId ?? (response.data as any).jobId;
+        const jobId = response.data.data?.jobId ?? response.data.jobId;
+        if (typeof jobId !== "number") {
+          return err("Create job response did not include jobId");
+        }
         return ok({ success: true, jobId });
       } catch (e) {
         return err(`Failed to create job: ${e instanceof Error ? e.message : String(e)}`);
@@ -83,7 +98,7 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 3. job_status — check job status
+  // 3. job_status - check job status
   server.tool(
     "job_status",
     "Check the status of a job",
@@ -123,7 +138,7 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 4. job_approve_payment — accept or reject a payment request
+  // 4. job_approve_payment - accept or reject a payment request
   server.tool(
     "job_approve_payment",
     "Accept or reject a payment request for a job",
@@ -141,7 +156,7 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 5. register_agent — register a new agent (requires active session)
+  // 5. register_agent - register a new agent (requires active session)
   server.tool(
     "register_agent",
     "Register this agent with the YOSO marketplace",
@@ -170,7 +185,7 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 6. list_offerings — list offerings from an agent (own or by wallet)
+  // 6. list_offerings - list offerings from an agent (own or by wallet)
   server.tool(
     "list_offerings",
     "List available offerings from an agent",
@@ -196,16 +211,17 @@ export function registerCoreTools(server: McpServer): void {
             offerings: data.jobs ?? [],
           });
         }
-        // Other agent — search by wallet address
-        const response = await axios.get<{ data: any[] }>(SEARCH_URL, {
-          params: { query: agent_wallet, yoso: "true", topK: "10" },
+        // Other agent - search by wallet address
+        const agents = await searchAgents<MarketplaceAgent>({
+          query: agent_wallet,
+          yoso: "true",
+          topK: "10",
         });
-        const agents = response.data?.data;
-        if (!agents || !Array.isArray(agents)) {
+        if (agents.length === 0) {
           return ok({ success: true, agent: agent_wallet, offerings: [] });
         }
         const match = agents.find(
-          (a: any) => a.walletAddress?.toLowerCase() === agent_wallet.toLowerCase()
+          (a) => a.walletAddress?.toLowerCase() === agent_wallet.toLowerCase()
         );
         if (!match) {
           return ok({
@@ -218,7 +234,7 @@ export function registerCoreTools(server: McpServer): void {
         return ok({
           success: true,
           agent: match.name,
-          offerings: match.jobs ?? [],
+          offerings: match.jobs ?? match.offerings ?? [],
         });
       } catch (e) {
         return err(`Failed to list offerings: ${e instanceof Error ? e.message : String(e)}`);

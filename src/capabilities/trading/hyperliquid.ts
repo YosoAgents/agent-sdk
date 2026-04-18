@@ -2,6 +2,7 @@ import { ethers } from "ethers";
 import { encode } from "@msgpack/msgpack";
 import axios, { type AxiosInstance } from "axios";
 import type { HyperliquidConfig } from "./config.js";
+import type { JsonObject } from "../../lib/types.js";
 
 const MAINNET_URL = "https://api.hyperliquid.xyz";
 const TESTNET_URL = "https://api.hyperliquid-testnet.xyz";
@@ -25,6 +26,30 @@ const AGENT_TYPES = {
   ],
 };
 
+export const HYPERLIQUID_ORDER_TYPES = ["limit", "market", "alo"] as const;
+export type HyperliquidOrderType = (typeof HYPERLIQUID_ORDER_TYPES)[number];
+
+type ExchangeStatus =
+  | string
+  | {
+      resting?: { oid: string | number };
+      filled?: { oid: string | number };
+      error?: string;
+    };
+
+interface ExchangeResponse {
+  status?: string;
+  response?: string | { data?: { statuses?: ExchangeStatus[] } };
+}
+
+interface PositionPayload {
+  coin: string;
+  szi: string;
+  entryPx: string;
+  unrealizedPnl: string;
+  liquidationPx?: string | null;
+}
+
 /** Normalize a float to wire format. Matches Python SDK's float_to_wire(). */
 export function floatToWire(x: number): string {
   const rounded = x.toFixed(8);
@@ -36,7 +61,6 @@ export function floatToWire(x: number): string {
   return normalized;
 }
 
-/** Strip trailing zeros from a decimal string. */
 function removeTrailingZeros(value: string): string {
   if (!value.includes(".")) return value;
   let normalized = value.replace(/\.?0+$/, "");
@@ -44,23 +68,22 @@ function removeTrailingZeros(value: string): string {
   return normalized;
 }
 
-/** Recursively normalize price/size/triggerPx string fields in an action. */
 export function normalizeAction<T>(obj: T): T {
   if (!obj || typeof obj !== "object") return obj;
   if (Array.isArray(obj)) {
     return obj.map((item) => normalizeAction(item)) as unknown as T;
   }
-  const result = { ...obj };
+  const result: Record<string, unknown> = { ...(obj as Record<string, unknown>) };
   for (const key in result) {
     if (!Object.prototype.hasOwnProperty.call(result, key)) continue;
     const value = result[key];
     if (value && typeof value === "object") {
       result[key] = normalizeAction(value);
     } else if ((key === "p" || key === "s" || key === "triggerPx") && typeof value === "string") {
-      result[key] = removeTrailingZeros(value) as any;
+      result[key] = removeTrailingZeros(value);
     }
   }
-  return result;
+  return result as T;
 }
 
 /**
@@ -156,7 +179,7 @@ export interface BracketOrderParams {
   isBuy: boolean;
   sizeUsd: number;
   entryPrice: number;
-  entryType?: "limit" | "market" | "alo";
+  entryType?: HyperliquidOrderType;
   tpPrice?: number;
   slPrice?: number;
 }
@@ -191,7 +214,7 @@ export class HyperliquidClient {
   }
 
   private async loadMeta(): Promise<void> {
-    // Native perps — universe array position IS the asset index (0-based)
+    // Native perps - universe array position IS the asset index (0-based)
     const meta = await this.infoPost<{ universe: Array<{ name: string; szDecimals: number }> }>(
       "meta"
     );
@@ -200,7 +223,7 @@ export class HyperliquidClient {
       this.assetIndices.set(asset.name, idx);
     });
 
-    // XYZ builder-deployed perps — offset 110000 (first builder dex)
+    // XYZ builder-deployed perps - offset 110000 (first builder dex)
     // From Python SDK info.py: perp_dex_to_offset = 110000 + i * 10000
     try {
       const xyzMeta = await this.infoPost<{
@@ -281,7 +304,7 @@ export class HyperliquidClient {
     return data as T;
   }
 
-  private async exchangePost(action: Record<string, unknown>): Promise<any> {
+  private async exchangePost(action: JsonObject): Promise<ExchangeResponse> {
     const nonce = Date.now();
     const payload = {
       action,
@@ -298,7 +321,7 @@ export class HyperliquidClient {
    * Port of Python SDK's sign_l1_action(): hash action → phantom agent → EIP-712.
    */
   private async signAction(
-    action: Record<string, unknown>,
+    action: JsonObject,
     nonce: number
   ): Promise<{ r: string; s: string; v: number }> {
     const hash = actionHash(action, null, nonce);
@@ -477,7 +500,7 @@ export class HyperliquidClient {
     const sz = this.usdToContracts(ticker, entryPrice, sizeUsd);
     if (sz <= 0) return { success: false, error: "Computed contract size is zero" };
 
-    const orders: any[] = [];
+    const orders: JsonObject[] = [];
 
     // Parent: entry order
     if (entryType === "market") {
@@ -550,10 +573,10 @@ export class HyperliquidClient {
       const result = await this.exchangePost({ type: "order", orders, grouping });
 
       if (result?.status === "err") {
-        return { success: false, error: result.response || "Order rejected" };
+        return { success: false, error: this.exchangeError(result, "Order rejected") };
       }
 
-      const statuses = result?.response?.data?.statuses ?? [];
+      const statuses = this.exchangeStatuses(result);
       const out: BracketOrderResult = { success: true };
 
       // Parse entry
@@ -597,7 +620,7 @@ export class HyperliquidClient {
         cancels: [{ a: this.assetIndex(ticker), o: oid }],
       });
       if (result?.status === "ok") return { success: true };
-      return { success: false, error: result?.response || "Cancel failed" };
+      return { success: false, error: this.exchangeError(result, "Cancel failed") };
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) };
     }
@@ -617,7 +640,7 @@ export class HyperliquidClient {
       const cancels = matching.map((o) => ({ a: this.assetIndex(ticker), o: o.oid }));
       const result = await this.exchangePost({ type: "cancel", cancels });
 
-      const statuses = result?.response?.data?.statuses ?? [];
+      const statuses = this.exchangeStatuses(result);
       let cancelled = 0;
       for (let i = 0; i < statuses.length; i++) {
         if (statuses[i] === "success") cancelled++;
@@ -705,7 +728,7 @@ export class HyperliquidClient {
     const positions: Position[] = [];
 
     // Native positions
-    const state = await this.infoPost<{ assetPositions: Array<{ position: any }> }>(
+    const state = await this.infoPost<{ assetPositions: Array<{ position: PositionPayload }> }>(
       "clearinghouseState",
       { user: this.address }
     );
@@ -713,10 +736,9 @@ export class HyperliquidClient {
 
     // XYZ positions
     try {
-      const xyzState = await this.infoPost<{ assetPositions: Array<{ position: any }> }>(
-        "clearinghouseState",
-        { user: this.address, dex: "xyz" }
-      );
+      const xyzState = await this.infoPost<{
+        assetPositions: Array<{ position: PositionPayload }>;
+      }>("clearinghouseState", { user: this.address, dex: "xyz" });
       positions.push(...this.parsePositions(xyzState));
     } catch {
       // XYZ may not be available
@@ -725,7 +747,9 @@ export class HyperliquidClient {
     return positions;
   }
 
-  private parsePositions(state: { assetPositions: Array<{ position: any }> }): Position[] {
+  private parsePositions(state: {
+    assetPositions: Array<{ position: PositionPayload }>;
+  }): Position[] {
     const positions: Position[] = [];
     for (const posData of state.assetPositions ?? []) {
       const item = posData.position;
@@ -760,10 +784,10 @@ export class HyperliquidClient {
     }
   }
 
-  async getFills(hoursBack = 24): Promise<any[]> {
+  async getFills(hoursBack = 24): Promise<unknown[]> {
     const startTime = Date.now() - hoursBack * 3600_000;
     try {
-      return await this.infoPost<any[]>("userFills", { user: this.address, startTime });
+      return await this.infoPost<unknown[]>("userFills", { user: this.address, startTime });
     } catch (e) {
       console.error("[hl] getFills failed:", e instanceof Error ? e.message : e);
       return [];
@@ -779,12 +803,23 @@ export class HyperliquidClient {
     return idx;
   }
 
-  private parseOrderResult(result: any): OrderResult {
+  private exchangeError(result: ExchangeResponse, defaultMessage: string): string {
+    if (typeof result.response === "string") return result.response;
+    return defaultMessage;
+  }
+
+  private exchangeStatuses(result: ExchangeResponse): ExchangeStatus[] {
+    return typeof result.response === "object" && Array.isArray(result.response.data?.statuses)
+      ? result.response.data.statuses
+      : [];
+  }
+
+  private parseOrderResult(result: ExchangeResponse): OrderResult {
     if (result?.status === "err") {
-      return { success: false, error: result.response || "Order rejected" };
+      return { success: false, error: this.exchangeError(result, "Order rejected") };
     }
 
-    const statuses = result?.response?.data?.statuses ?? [];
+    const statuses = this.exchangeStatuses(result);
     if (!statuses.length) return { success: false, error: "No status returned" };
 
     const s = statuses[0];

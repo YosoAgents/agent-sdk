@@ -1,10 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
-import { fileURLToPath } from "url";
 import type { OfferingHandlers } from "./offeringTypes.js";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { ROOT } from "../../lib/config.js";
 
 export interface OfferingConfig {
   name: string;
@@ -12,7 +9,6 @@ export interface OfferingConfig {
   jobFee: number;
   jobFeeType: "fixed" | "percentage";
   requiredFunds: boolean;
-  subscriptionTiers?: { name: string; price: number; duration: number }[];
 }
 
 export interface LoadedOffering {
@@ -21,7 +17,12 @@ export interface LoadedOffering {
 }
 
 function resolveOfferingsRoot(agentDirName: string): string {
-  return path.resolve(__dirname, "..", "offerings", agentDirName);
+  return path.resolve(ROOT, "src", "seller", "offerings", agentDirName);
+}
+
+function isPathInside(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 /**
@@ -44,7 +45,7 @@ export async function loadOffering(
   // Verify resolved path stays under offerings root (prevents symlink escape)
   const realOfferingDir = fs.existsSync(offeringDir) ? fs.realpathSync(offeringDir) : offeringDir;
   const realRoot = fs.existsSync(offeringsRoot) ? fs.realpathSync(offeringsRoot) : offeringsRoot;
-  if (!realOfferingDir.startsWith(realRoot)) {
+  if (!isPathInside(realRoot, realOfferingDir)) {
     throw new Error(`Offering directory escapes offerings root: ${offeringName}`);
   }
 
@@ -62,9 +63,12 @@ export async function loadOffering(
 
   // Convert Windows path to file:// URL for ESM import()
   const handlersUrl = new URL(`file:///${handlersPath.replace(/\\/g, "/")}`).href;
-  const handlers = (await import(handlersUrl)) as OfferingHandlers;
+  const imported = (await import(handlersUrl)) as OfferingHandlers & {
+    default?: OfferingHandlers;
+  };
+  const handlers = typeof imported.executeJob === "function" ? imported : imported.default;
 
-  if (typeof handlers.executeJob !== "function") {
+  if (typeof handlers?.executeJob !== "function") {
     throw new Error(`handlers.ts in "${offeringName}" must export an executeJob function`);
   }
 

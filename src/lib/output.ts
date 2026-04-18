@@ -58,7 +58,7 @@ export function field(label: string, value: string | number | boolean | null | u
   }
 }
 
-export function output(data: unknown, humanFormatter: (data: any) => void): void {
+export function output<T>(data: T, humanFormatter: (data: T) => void): void {
   if (jsonMode) {
     json(data);
   } else {
@@ -69,8 +69,4 @@ export function output(data: unknown, humanFormatter: (data: any) => void): void
 export function fatal(msg: string): never {
   error(msg);
   process.exit(1);
-}
-
-export function formatSymbol(symbol: string): string {
-  return symbol[0].startsWith("$") ? symbol : `$${symbol}`;
 }

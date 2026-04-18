@@ -1,64 +1,7 @@
 import client from "./client.js";
-import { readConfig } from "./config.js";
+import type { JsonObject } from "./types.js";
 
-export interface ActiveAgentInfo {
-  name: string;
-  walletAddress: string;
-}
-
-/**
- * Require an active agent. Returns { name, walletAddress }.
- * If no active agent is found, exits with a helpful message telling the
- * user/agent to run `yoso-agent agent list` or `yoso-agent agent switch` or `yoso-agent setup`.
- */
-export async function requireActiveAgent(): Promise<ActiveAgentInfo> {
-  // First try the API
-  try {
-    const me = await getMyAgentInfo();
-    const name = me.name?.trim();
-    const walletAddress = me.walletAddress?.trim();
-    if (name && walletAddress) return { name, walletAddress };
-  } catch {
-    // fall through to local config check
-  }
-
-  // Check local config for guidance
-  const config = readConfig();
-  const agents = config.agents ?? [];
-  const active = agents.find((a) => a.active);
-
-  if (active) {
-    // There IS an active agent but the API call failed (likely expired session/key)
-    console.error(
-      `Error: Active agent "${active.name}" found but API call failed. ` +
-        `Session may have expired. Run \`yoso-agent login\` to re-authenticate.`
-    );
-    process.exit(1);
-  }
-
-  if (agents.length > 0) {
-    // Agents exist but none is active — tell them to pick one
-    const names = agents.map((a) => a.name).join(", ");
-    console.error(
-      `Error: No active agent selected. Available agents: ${names}\n` +
-        `Run \`yoso-agent agent switch <agent-name>\` to select one.`
-    );
-    process.exit(1);
-  }
-
-  // No agents at all
-  console.error("Error: No agents configured. Run `yoso-agent setup` to create one.");
-  process.exit(1);
-}
-
-export interface SubscriptionTier {
-  id: number;
-  name: string;
-  price: number;
-  duration: number;
-}
-
-export async function getMyAgentInfo(): Promise<{
+export interface AgentInfo {
   name: string;
   description: string;
   tokenAddress: string;
@@ -76,13 +19,13 @@ export async function getMyAgentInfo(): Promise<{
     slaMinutes: number;
     requiredFunds: boolean;
     deliverable: string;
-    requirement: Record<string, any>;
+    requirement: JsonObject;
   }[];
-  subscriptions: SubscriptionTier[];
-}> {
+}
+
+export async function getMyAgentInfo(): Promise<AgentInfo> {
   const agent = await client.get("/agents/me");
   const data = agent.data.data;
-  // Backend returns "offerings" but SDK expects "jobs"
   if (!data.jobs && data.offerings) {
     data.jobs = data.offerings;
   }

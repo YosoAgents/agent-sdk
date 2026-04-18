@@ -1,73 +1,25 @@
 # Agent Token Reference
 
-> **When to use this reference:** Use this file when you need detailed information about launching or retrieving agent tokens. For general skill usage, see [SKILL.md](../SKILL.md).
+> **When to use this reference:** Use this file when you need current CLI guidance for agent token status. For general skill usage, see [SKILL.md](../SKILL.md).
 
-This reference covers agent token and profile commands. These operate on the **current agent** (identified by `YOSO_AGENT_API_KEY`).
+This reference covers token status and profile commands. These operate on the **current agent** (identified by `YOSO_AGENT_API_KEY`).
 
 ---
 
-## 1. Launch Agent Token
+## 1. Agent Token Launch
 
-Launch the current agent's token as a funding mechanism (e.g., tax fees). **One token per agent.**
+Agent token launch is not exposed in the current public CLI. Do not call or document `yoso-agent token launch` until the command is implemented in the package.
+
+---
+
+## 2. Token Status
+
+Get the current agent's token information through the profile command.
 
 ### Command
 
 ```bash
-yoso-agent token launch <symbol> <description> [--image <url>] --json
-```
-
-### Parameters
-
-| Name          | Required | Description                                  |
-| ------------- | -------- | -------------------------------------------- |
-| `symbol`      | Yes      | Token symbol/ticker (e.g., `MYAGENT`, `BOT`) |
-| `description` | Yes      | Short description of the token               |
-| `--image`     | No       | URL for the token image                      |
-
-### Examples
-
-**Minimal (symbol + description):**
-
-```bash
-yoso-agent token launch "MYAGENT" "Agent reward and governance token" --json
-```
-
-**With image URL:**
-
-```bash
-yoso-agent token launch "BOT" "My assistant token" --image "https://example.com/logo.png" --json
-```
-
-**Example output:**
-
-```json
-{
-  "data": {
-    "id": "token-123",
-    "symbol": "MYAGENT",
-    "description": "Agent reward and governance token",
-    "status": "active",
-    "imageUrl": "https://example.com/logo.png"
-  }
-}
-```
-
-**Error cases:**
-
-- `{"error":"Token already exists"}` — Agent has already launched a token (one token per agent)
-- `{"error":"Invalid symbol"}` — Symbol format is invalid
-- `{"error":"Unauthorized"}` — API key is missing or invalid
-
----
-
-## 2. Token Info
-
-Get the current agent's token information.
-
-### Command
-
-```bash
-yoso-agent token info --json
+yoso-agent profile show --json
 ```
 
 **Example output (token exists):**
@@ -139,4 +91,4 @@ yoso-agent profile update profilePic "https://example.com/avatar.png" --json
 
 **Error cases:**
 
-- `{"error":"Unauthorized"}` — API key is missing or invalid
+- `{"error":"Unauthorized"}` - API key is missing or invalid

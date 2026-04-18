@@ -13,13 +13,17 @@ import {
   findAgentByWalletAddress,
 } from "../lib/config.js";
 import {
-  ensureSession,
+  getValidSessionToken,
   fetchAgents,
   createAgentApi,
   regenerateApiKey,
   syncAgentsToConfig,
   isAgentApiKeyValid,
 } from "../lib/auth.js";
+import { hasEnvModeAgent } from "../lib/env-file.js";
+import { assertSecretsNotTracked } from "../lib/git-guard.js";
+import { storeAgentKey } from "../lib/wallet-storage.js";
+import { ROOT } from "../lib/paths.js";
 
 function redactApiKey(key: string | undefined): string {
   if (!key || key.length < 8) return "(not available)";
@@ -77,9 +81,9 @@ export async function stopSellerIfRunning(): Promise<boolean> {
   try {
     const { getMyAgentInfo } = await import("../lib/wallet.js");
     const info = await getMyAgentInfo();
-    offeringNames = (info.jobs ?? []).map((j: any) => j.name);
+    offeringNames = (info.jobs ?? []).map((job) => job.name);
   } catch {
-    // Non-fatal — just won't show offering names
+    // Non-fatal - just won't show offering names
   }
 
   const offeringsLine =
@@ -119,17 +123,22 @@ function displayAgents(agents: AgentEntry[]): void {
 }
 
 export async function list(): Promise<void> {
-  const sessionToken = await ensureSession();
   let agents: AgentEntry[];
+  const sessionToken = getValidSessionToken();
 
-  try {
-    const serverAgents = await fetchAgents(sessionToken);
-    agents = syncAgentsToConfig(serverAgents);
-  } catch (e) {
-    output.warn(
-      `Could not fetch agents from server: ${e instanceof Error ? e.message : String(e)}`
-    );
-    output.log("  Showing locally saved agents.\n");
+  if (sessionToken) {
+    try {
+      const serverAgents = await fetchAgents(sessionToken);
+      agents = syncAgentsToConfig(serverAgents);
+    } catch (e) {
+      output.warn(
+        `Could not fetch agents from server: ${e instanceof Error ? e.message : String(e)}`
+      );
+      output.log("  Showing locally saved agents.\n");
+      agents = readConfig().agents ?? [];
+    }
+  } else {
+    output.log("  No browser session found. Showing locally saved agents.\n");
     agents = readConfig().agents ?? [];
   }
 
@@ -177,6 +186,15 @@ export async function switchAgent(walletAddress: string): Promise<void> {
     output.fatal("Usage: yoso-agent agent switch <walletAddress>");
   }
 
+  if (hasEnvModeAgent(ROOT)) {
+    output.fatal(
+      "`agent switch` is not supported in env mode. Switching would overwrite " +
+        "AGENT_PRIVATE_KEY and make the current agent unrecoverable. " +
+        "Use --keystore mode for multi-agent storage in one directory, or cd to " +
+        "each agent's original directory."
+    );
+  }
+
   const target = findAgentByWalletAddress(walletAddress);
   if (!target) {
     const config = readConfig();
@@ -200,8 +218,6 @@ export async function switchAgent(walletAddress: string): Promise<void> {
     throw new Error("Agent switch cancelled");
   }
 
-  const sessionToken = await ensureSession();
-
   output.log(`  Switching to ${target.name}...\n`);
   try {
     let apiKey: string = "";
@@ -215,12 +231,12 @@ export async function switchAgent(walletAddress: string): Promise<void> {
     }
 
     if (!valid) {
-      const result = await regenerateApiKey(sessionToken, target.walletAddress);
+      const result = await regenerateApiKey(null, target.walletAddress);
       apiKey = result.apiKey;
     }
 
     if (!apiKey) {
-      output.fatal("Failed to switch agent — no API key returned.");
+      output.fatal("Failed to switch agent - no API key returned.");
     }
 
     activateAgent(target.id, apiKey);
@@ -241,9 +257,32 @@ export async function switchAgent(walletAddress: string): Promise<void> {
   }
 }
 
-export async function create(name: string): Promise<void> {
+export interface CreateOptions {
+  useKeystore?: boolean;
+}
+
+export async function create(name: string, options: CreateOptions = {}): Promise<void> {
   if (!name) {
     output.fatal("Usage: yoso-agent agent create <name>");
+  }
+
+  const useKeystore = options.useKeystore ?? false;
+
+  if (!useKeystore) {
+    // Env-mode preflight: refuse if writes would leak, or overwrite existing agent.
+    try {
+      assertSecretsNotTracked(ROOT, [".env", "config.json"]);
+      if (hasEnvModeAgent(ROOT)) {
+        throw new Error(
+          "This directory already has an env-mode agent. `agent create` here would " +
+            "overwrite AGENT_PRIVATE_KEY and make the current agent unrecoverable. " +
+            "Create the new agent in a separate directory, or use --keystore mode " +
+            "for multi-agent storage here."
+        );
+      }
+    } catch (e) {
+      output.fatal(e instanceof Error ? e.message : String(e));
+    }
   }
 
   // Stop seller runtime if running (API key will change)
@@ -253,13 +292,20 @@ export async function create(name: string): Promise<void> {
     return;
   }
 
-  const sessionToken = await ensureSession();
-
   try {
-    const result = await createAgentApi(sessionToken, name);
+    const result = await createAgentApi(getValidSessionToken(), name);
     if (!result?.apiKey) {
-      output.fatal("Create agent failed — no API key returned.");
+      output.fatal("Create agent failed - no API key returned.");
     }
+
+    const stored = await storeAgentKey({
+      root: ROOT,
+      privateKey: result.walletPrivateKey,
+      walletAddress: result.walletAddress,
+      apiKey: result.apiKey,
+      useKeystore,
+      warn: (msg) => output.warn(msg),
+    });
 
     // Add to local config and activate
     const config = readConfig();
@@ -274,7 +320,6 @@ export async function create(name: string): Promise<void> {
       name: result.name || name,
       walletAddress: result.walletAddress,
       apiKey: result.apiKey,
-      walletPrivateKey: result.walletPrivateKey,
       active: true,
     };
     updatedAgents.push(newAgent);
@@ -291,11 +336,25 @@ export async function create(name: string): Promise<void> {
         name: newAgent.name,
         id: newAgent.id,
         walletAddress: newAgent.walletAddress,
+        keystorePath: stored.mode === "keystore" ? stored.metadata.path : undefined,
+        envPath: stored.mode === "env" ? stored.envPath : undefined,
+        signingKey: stored.mode === "env" ? "AGENT_PRIVATE_KEY" : undefined,
       },
       () => {
         output.success(`Agent created: ${newAgent.name}`);
         output.log(`    Wallet:  ${newAgent.walletAddress}`);
-        output.log(`    API Key: ${redactApiKey(newAgent.apiKey)} (saved to config.json)\n`);
+        output.log(`    API Key: ${redactApiKey(newAgent.apiKey)}`);
+        if (stored.mode === "keystore") {
+          output.log(`    Keystore: ${stored.metadata.path}`);
+          output.log(
+            "    Wallet key encrypted locally. Losing the keystore password means the encrypted key cannot be recovered."
+          );
+        } else {
+          output.log(`    Env file: ${stored.envPath}`);
+          output.log(
+            "    AGENT_PRIVATE_KEY saved to .env (gitignored). Keep the file off version control and out of logs."
+          );
+        }
       }
     );
   } catch (e) {

@@ -1,8 +1,3 @@
-// =============================================================================
-// Unit tests for Hyperliquid client utility functions.
-// No network calls -- tests pure computation only.
-// =============================================================================
-
 import { describe, it, expect } from "vitest";
 import {
   HyperliquidClient,
@@ -58,8 +53,6 @@ describe("HyperliquidClient.intervalToMs", () => {
   });
 });
 
-// -- New: Wire format helpers --
-
 describe("floatToWire", () => {
   it("strips trailing zeros", () => {
     expect(floatToWire(3500)).toBe("3500");
@@ -82,10 +75,8 @@ describe("floatToWire", () => {
   });
 
   it("throws on lossy rounding", () => {
-    // Numbers that lose precision beyond 8 decimal places
     expect(() => floatToWire(1.000000001)).toThrow("floatToWire causes rounding");
     expect(() => floatToWire(0.123456789123)).toThrow("floatToWire causes rounding");
-    // Within 8 decimals is fine
     expect(() => floatToWire(1.00000001)).not.toThrow();
   });
 });

@@ -1,35 +1,16 @@
+import { execSync } from "child_process";
 import * as fs from "fs";
-import * as path from "path";
-import { fileURLToPath } from "url";
+import { CONFIG_JSON_PATH, LOGS_DIR, ROOT, SDK_ROOT } from "./paths.js";
+import { assertNoPlaintextPrivateKeys } from "./keystore.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-/** Repo root — two levels up from src/lib/ */
-export const ROOT = path.resolve(__dirname, "..", "..");
-export const CONFIG_JSON_PATH = path.resolve(ROOT, "config.json");
-export const LOGS_DIR = path.resolve(ROOT, "logs");
+export { LOGS_DIR, ROOT, SDK_ROOT };
 
 export interface AgentEntry {
   id: string;
   name: string;
   walletAddress: string;
   apiKey: string | undefined; // only present for active/previously-switched agents
-  walletPrivateKey: string | undefined; // returned once during registration, needed for on-chain signing
   active: boolean;
-}
-
-export interface RailwayProjectConfig {
-  project: string;
-  environment: string;
-}
-
-export interface DeployInfo {
-  provider: string;
-  agentName: string;
-  offerings: string[];
-  deployedAt: string;
-  railwayConfig: RailwayProjectConfig;
 }
 
 export interface ConfigJson {
@@ -38,30 +19,28 @@ export interface ConfigJson {
   };
   YOSO_AGENT_API_KEY?: string;
   SELLER_PID?: number;
-  YOSO_BOUNTY_CRON_JOB_ID?: string;
   agents?: AgentEntry[];
-  DEPLOYS?: Record<string, DeployInfo>; // keyed by agent ID
-  YOSO_BUILDER_CODE?: string;
 }
 
 export function readConfig(): ConfigJson {
   if (!fs.existsSync(CONFIG_JSON_PATH)) {
     return {};
   }
+  const content = fs.readFileSync(CONFIG_JSON_PATH, "utf-8");
+  let config: unknown;
   try {
-    const content = fs.readFileSync(CONFIG_JSON_PATH, "utf-8");
-    return JSON.parse(content);
-  } catch {
-    return {};
+    config = JSON.parse(content);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to parse config.json at ${CONFIG_JSON_PATH}: ${msg}`);
   }
+  assertNoPlaintextPrivateKeys(config);
+  return config as ConfigJson;
 }
 
 export function writeConfig(config: ConfigJson): void {
-  try {
-    fs.writeFileSync(CONFIG_JSON_PATH, JSON.stringify(config, null, 2) + "\n");
-  } catch (err) {
-    console.error(`Failed to write config.json: ${err}`);
-  }
+  assertNoPlaintextPrivateKeys(config);
+  fs.writeFileSync(CONFIG_JSON_PATH, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
 }
 
 export function loadApiKey(): string | undefined {
@@ -73,19 +52,6 @@ export function loadApiKey(): string | undefined {
   if (typeof key === "string" && key.trim()) {
     process.env.YOSO_AGENT_API_KEY = key;
     return key;
-  }
-  return undefined;
-}
-
-export function loadBuilderCode(): string | undefined {
-  if (process.env.YOSO_BUILDER_CODE?.trim()) {
-    return process.env.YOSO_BUILDER_CODE.trim();
-  }
-  const config = readConfig();
-  const code = config.YOSO_BUILDER_CODE;
-  if (typeof code === "string" && code.trim()) {
-    process.env.YOSO_BUILDER_CODE = code;
-    return code;
   }
   return undefined;
 }
@@ -103,30 +69,22 @@ export function isProcessRunning(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch (err: any) {
-    return err.code !== "ESRCH";
+  } catch (err: unknown) {
+    return !(err && typeof err === "object" && "code" in err && err.code === "ESRCH");
   }
 }
 
 export function writePidToConfig(pid: number): void {
-  try {
-    const config = readConfig();
-    config.SELLER_PID = pid;
-    writeConfig(config);
-  } catch (err) {
-    console.error(`Failed to write PID to config.json: ${err}`);
-  }
+  const config = readConfig();
+  config.SELLER_PID = pid;
+  writeConfig(config);
 }
 
 export function removePidFromConfig(): void {
-  try {
-    const config = readConfig();
-    if (config.SELLER_PID !== undefined) {
-      delete config.SELLER_PID;
-      writeConfig(config);
-    }
-  } catch {
-    // Best effort cleanup
+  const config = readConfig();
+  if (config.SELLER_PID !== undefined) {
+    delete config.SELLER_PID;
+    writeConfig(config);
   }
 }
 
@@ -144,7 +102,7 @@ export function checkForExistingProcess(): void {
   }
 }
 
-/** Find the PID of a running seller process (config check + OS fallback). */
+/** Find the PID of a running seller process. */
 export function findSellerPid(): number | undefined {
   const config = readConfig();
   if (config.SELLER_PID !== undefined && isProcessRunning(config.SELLER_PID)) {
@@ -153,13 +111,14 @@ export function findSellerPid(): number | undefined {
   if (config.SELLER_PID !== undefined) {
     removePidFromConfig();
   }
-  // Fallback: scan OS processes
   try {
-    const { execSync } = require("child_process");
-    const out = execSync('ps ax -o pid,command | grep "seller/runtime/seller.ts" | grep -v grep', {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const out = execSync(
+      'ps ax -o pid,command | grep -E "seller/runtime/seller\\.(ts|js)" | grep -v grep',
+      {
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+      }
+    );
     for (const line of out.trim().split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) continue;

@@ -1,10 +1,10 @@
 import { spawn } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
-import { fileURLToPath } from "url";
+import { pathToFileURL } from "url";
 import * as output from "../lib/output.js";
 import { getMyAgentInfo } from "../lib/wallet.js";
-import { checkForLegacyOfferings } from "./sell.js";
+import { checkForLegacyOfferings } from "./legacy-offerings.js";
 import {
   findSellerPid,
   isProcessRunning,
@@ -12,13 +12,26 @@ import {
   getActiveAgent,
   sanitizeAgentName,
   ROOT,
+  SDK_ROOT,
   LOGS_DIR,
 } from "../lib/config.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const SELLER_LOG_PATH = path.resolve(LOGS_DIR, "seller.log");
+
+interface SellerCommand {
+  command: string;
+  args: string[];
+  shell: boolean;
+}
+
+function resolveTsxLoader(): string | null {
+  const candidates = [
+    path.resolve(ROOT, "node_modules", "tsx", "dist", "loader.mjs"),
+    path.resolve(SDK_ROOT, "node_modules", "tsx", "dist", "loader.mjs"),
+    path.resolve(SDK_ROOT, "..", "tsx", "dist", "loader.mjs"),
+  ];
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
+}
 
 function getOfferingsRoot(): string {
   const agent = getActiveAgent();
@@ -30,6 +43,32 @@ function ensureLogsDir(): void {
   if (!fs.existsSync(LOGS_DIR)) {
     fs.mkdirSync(LOGS_DIR, { recursive: true });
   }
+}
+
+function resolveSellerCommand(): SellerCommand {
+  const tsxLoader = resolveTsxLoader();
+  if (!tsxLoader) {
+    output.fatal(
+      "Could not find the tsx runtime required to load offering handlers. " +
+        "Install yoso-agent locally or reinstall the package."
+    );
+  }
+
+  const compiledScript = path.resolve(SDK_ROOT, "dist", "src", "seller", "runtime", "seller.js");
+  if (fs.existsSync(compiledScript)) {
+    return {
+      command: process.execPath,
+      args: ["--import", pathToFileURL(tsxLoader).href, compiledScript],
+      shell: false,
+    };
+  }
+
+  const sourceScript = path.resolve(SDK_ROOT, "src", "seller", "runtime", "seller.ts");
+  return {
+    command: process.execPath,
+    args: ["--import", pathToFileURL(tsxLoader).href, sourceScript],
+    shell: false,
+  };
 }
 
 function offeringHasLocalFiles(offeringName: string): boolean {
@@ -68,22 +107,19 @@ export async function start(): Promise<void> {
       }
     }
   } catch {
-    // Non-fatal — proceed with starting anyway
+    // Non-fatal - proceed with starting anyway
   }
 
-  const sellerScript = path.resolve(__dirname, "..", "seller", "runtime", "seller.ts");
-  // On Windows, .bin/tsx is a bash script — use .cmd extension or npx
-  const tsxCmd = process.platform === "win32" ? "tsx.cmd" : "tsx";
-  const tsxBin = path.resolve(ROOT, "node_modules", ".bin", tsxCmd);
+  const sellerCommand = resolveSellerCommand();
 
   ensureLogsDir();
   const logFd = fs.openSync(SELLER_LOG_PATH, "a");
 
-  const sellerProcess = spawn(tsxBin, [sellerScript], {
+  const sellerProcess = spawn(sellerCommand.command, sellerCommand.args, {
     detached: true,
     stdio: ["ignore", logFd, logFd],
     cwd: ROOT,
-    shell: process.platform === "win32",
+    shell: sellerCommand.shell,
   });
 
   if (!sellerProcess.pid) {
@@ -115,8 +151,10 @@ export async function stop(): Promise<void> {
 
   try {
     process.kill(pid, "SIGTERM");
-  } catch (err: any) {
-    output.fatal(`Failed to send SIGTERM to PID ${pid}: ${err.message}`);
+  } catch (err: unknown) {
+    output.fatal(
+      `Failed to send SIGTERM to PID ${pid}: ${err instanceof Error ? err.message : String(err)}`
+    );
   }
 
   // Wait and verify
@@ -185,29 +223,36 @@ export async function logs(follow: boolean = false, filter: LogFilter = {}): Pro
   const active = hasActiveFilter(filter);
 
   if (follow) {
-    const tail = spawn("tail", ["-f", SELLER_LOG_PATH], {
-      stdio: active ? ["ignore", "pipe", "pipe"] : "inherit",
-    });
-
-    if (active && tail.stdout) {
+    // Cross-platform log following using fs.watch + read stream
+    let position = fs.statSync(SELLER_LOG_PATH).size;
+    const readNewLines = () => {
+      const stat = fs.statSync(SELLER_LOG_PATH);
+      if (stat.size <= position) {
+        position = stat.size; // handle file truncation
+        return;
+      }
+      const stream = fs.createReadStream(SELLER_LOG_PATH, { start: position, encoding: "utf-8" });
       let buffer = "";
-      tail.stdout.on("data", (chunk: Buffer) => {
-        buffer += chunk.toString();
+      stream.on("data", (chunk: string) => {
+        buffer += chunk;
         const lines = buffer.split("\n");
         buffer = lines.pop()!;
         for (const line of lines) {
-          if (matchesFilter(line, filter)) {
+          if (!active || matchesFilter(line, filter)) {
             process.stdout.write(line + "\n");
           }
         }
       });
-    }
+      stream.on("end", () => {
+        position = stat.size;
+      });
+    };
 
-    // Keep running until user hits Ctrl+C
+    const watcher = fs.watch(SELLER_LOG_PATH, () => readNewLines());
+
     await new Promise<void>((resolve) => {
-      tail.on("close", () => resolve());
       process.on("SIGINT", () => {
-        tail.kill();
+        watcher.close();
         resolve();
       });
     });

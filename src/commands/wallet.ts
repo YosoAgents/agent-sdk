@@ -82,17 +82,46 @@ export async function topup(): Promise<void> {
     const info = await getMyAgentInfo();
     const result = await getPaymentUrl();
 
-    if (!result.success || !result.url) {
-      output.fatal("Failed to get topup URL.");
+    if (!result.success || !result.data) {
+      output.fatal("Failed to get topup instructions.");
     }
 
-    output.output({ url: result.url, walletAddress: info.walletAddress }, (data) => {
+    const topup = result.data;
+    const data = {
+      walletAddress: topup.agentWallet || info.walletAddress,
+      url: result.url,
+      contractAddress: topup.contractAddress,
+      chain: topup.chain,
+      chainId: topup.chainId,
+      symbol: topup.symbol,
+      gasToken: topup.gasToken,
+      explorerUrl: topup.explorerUrl,
+      instructions: topup.instructions ?? [],
+    };
+
+    output.output(data, (details) => {
       output.heading("Wallet Topup");
-      output.field("Wallet Address", data.walletAddress);
-      output.field("Topup URL", data.url);
-      output.log("\n  Visit the URL above to add funds to your wallet.\n");
+      output.field("Wallet Address", details.walletAddress);
+      if (details.url) {
+        output.field("Topup URL", details.url);
+        output.log("\n  Visit the URL above to add funds to your wallet.\n");
+        return;
+      }
+      if (details.chain) output.field("Chain", details.chain);
+      if (details.chainId) output.field("Chain ID", String(details.chainId));
+      if (details.symbol) output.field("Token", details.symbol);
+      if (details.contractAddress) output.field("Token Contract", details.contractAddress);
+      if (details.gasToken) output.field("Gas Token", details.gasToken);
+      if (details.explorerUrl) output.field("Explorer", details.explorerUrl);
+      if (details.instructions.length > 0) {
+        output.log("\n  Instructions:");
+        for (const instruction of details.instructions) {
+          output.log(`  - ${instruction}`);
+        }
+      }
+      output.log("");
     });
   } catch (e) {
-    output.fatal(`Failed to get topup URL: ${e instanceof Error ? e.message : String(e)}`);
+    output.fatal(`Failed to get topup instructions: ${e instanceof Error ? e.message : String(e)}`);
   }
 }

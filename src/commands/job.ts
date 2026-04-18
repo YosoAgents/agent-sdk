@@ -1,10 +1,11 @@
-import { ethers } from "ethers";
 import client from "../lib/client.js";
 import { formatPrice, getActiveAgent } from "../lib/config.js";
 import * as output from "../lib/output.js";
-import { getBountyByJobId } from "../lib/bounty.js";
 import { processNegotiationPhase, getJobDetails, reportEscrow } from "../lib/api.js";
 import { ContractClient } from "../lib/contract-client.js";
+import { JobPhase, MemoType } from "../seller/runtime/types.js";
+import type { JsonObject } from "../lib/types.js";
+import { loadSigningWallet } from "../lib/keystore.js";
 
 function renderDeliverable(deliverable: unknown): string {
   if (typeof deliverable === "string") return deliverable;
@@ -14,37 +15,26 @@ function renderDeliverable(deliverable: unknown): string {
 export async function create(
   agentWalletAddress: string,
   jobOfferingName: string,
-  serviceRequirements: Record<string, unknown>,
-  preferredSubscriptionTier?: string,
+  serviceRequirements: JsonObject,
   isAutomated: boolean = false
 ): Promise<void> {
   if (!agentWalletAddress || !jobOfferingName) {
     output.fatal(
-      "Usage: yoso-agent job create <agentWalletAddress> <jobOfferingName> [--requirements '<json>'] [--subscription '<subscriptionTier>'] [--isAutomated <true|false>]"
+      "Usage: yoso-agent job create <agentWalletAddress> <jobOfferingName> [--requirements '<json>'] [--isAutomated <true|false>]"
     );
   }
 
-  const subscriptionRequired = preferredSubscriptionTier != null;
-
-  if (subscriptionRequired) {
-    output.log(`\n  Subscription tier: ${preferredSubscriptionTier}`);
-  }
-
   try {
-    const job = await client.post<{ data: { jobId: number } }>("/agents/jobs", {
+    const job = await client.post<{ data?: { jobId: number }; jobId?: number }>("/agents/jobs", {
       providerWalletAddress: agentWalletAddress,
       jobOfferingName,
       serviceRequirements,
-      ...(preferredSubscriptionTier != null && { preferredSubscriptionTier }),
       isAutomated,
     });
 
     output.output(job.data, (data) => {
       output.heading("Job Created");
       output.field("Job ID", data.data?.jobId ?? data.jobId);
-      if (subscriptionRequired) {
-        output.field("Subscription Tier", preferredSubscriptionTier);
-      }
       output.log("\n  Job submitted. Use `yoso-agent job status <jobId>` to check progress.\n");
     });
   } catch (e) {
@@ -52,15 +42,29 @@ export async function create(
   }
 }
 
+function parseJobId(jobId: string, usage: string): number {
+  if (!/^\d+$/.test(jobId)) {
+    output.fatal(usage);
+  }
+  const parsed = Number(jobId);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    output.fatal("Job ID must be a positive safe integer.");
+  }
+  return parsed;
+}
+
 export async function pay(jobId: string, accept: boolean, content?: string): Promise<void> {
   if (!jobId) {
     output.fatal("Usage: yoso-agent job pay <jobId> --accept <true|false> [--content '<text>']");
   }
 
-  const numJobId = Number(jobId);
+  const numJobId = parseJobId(
+    jobId,
+    "Usage: yoso-agent job pay <jobId> --accept <true|false> [--content '<text>']"
+  );
 
   try {
-    // Reject path — API only, no on-chain interaction
+    // Reject path - API only, no on-chain interaction
     if (!accept) {
       await processNegotiationPhase(numJobId, { accept: false, ...(content ? { content } : {}) });
       output.output({ jobId: numJobId, accept: false }, (data) => {
@@ -71,17 +75,17 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
       return;
     }
 
-    // Accept path — check if on-chain escrow needed
+    // Accept path - check if on-chain escrow needed
     const job = await getJobDetails(numJobId);
     const budget = BigInt(job.budget || "0");
 
     if (budget > BigInt(0)) {
       // On-chain escrow flow
 
-      // Gate: must be in NEGOTIATION (phase 1) — provider has accepted
-      if (job.phase !== 1) {
+      // Gate: must be in NEGOTIATION (phase 1) - provider has accepted
+      if (job.phase !== JobPhase.NEGOTIATION) {
         output.fatal(
-          `Job is in phase ${job.phase}, expected 1 (NEGOTIATION). Provider must accept before escrow.`
+          `Job is in phase ${job.phase}, expected ${JobPhase.NEGOTIATION} (NEGOTIATION). Provider must accept before escrow.`
         );
       }
 
@@ -95,21 +99,8 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
           output.fatal("No active agent. Run `yoso-agent setup` first.");
         }
 
-        const pk = process.env.AGENT_PRIVATE_KEY || activeAgent.walletPrivateKey;
-        if (!pk) {
-          output.fatal(
-            "Private key required for paid jobs. Set AGENT_PRIVATE_KEY env var or re-run `yoso-agent setup` to register a new agent with a wallet."
-          );
-        }
-
-        const derivedAddress = new ethers.Wallet(pk).address;
-        if (derivedAddress.toLowerCase() !== activeAgent.walletAddress.toLowerCase()) {
-          output.fatal(
-            `Private key mismatch: derived ${derivedAddress} but active agent is ${activeAgent.walletAddress}. Check AGENT_PRIVATE_KEY.`
-          );
-        }
-
-        const contractClient = new ContractClient(pk);
+        const wallet = await loadSigningWallet(activeAgent.walletAddress);
+        const contractClient = new ContractClient(wallet.privateKey);
 
         let onChainJobId = job.onChainJobId;
         let createJobTxHash = "";
@@ -151,7 +142,7 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
           createJobTxHash = createResult.data.txHash;
           output.log(`  On-chain job: ${onChainJobId} (tx: ${createJobTxHash})`);
         } else {
-          output.log(`  Resuming — on-chain job ${onChainJobId} already exists.`);
+          output.log(`  Resuming - on-chain job ${onChainJobId} already exists.`);
         }
 
         // Create on-chain memo proposing TRANSACTION phase
@@ -159,9 +150,9 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
         const memoResult = await contractClient.createMemo({
           jobId: onChainJobId,
           content: "Escrow deposit",
-          memoType: 0, // MESSAGE
+          memoType: MemoType.MESSAGE,
           isSecured: false,
-          nextPhase: 2, // TRANSACTION
+          nextPhase: JobPhase.TRANSACTION,
         });
         if (!memoResult.success) {
           output.fatal(`On-chain memo creation failed: ${memoResult.error}`);
@@ -169,7 +160,7 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
 
         output.log(`  Memo: ${memoResult.data.memoId} (tx: ${memoResult.data.txHash})`);
 
-        // Report to backend — backend validates and notifies provider to sign
+        // Report to backend - backend validates and notifies provider to sign
         output.log("  Reporting to backend...");
         await reportEscrow(numJobId, createJobTxHash, onChainJobId, memoResult.data.memoId);
 
@@ -186,7 +177,7 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
       output.heading("Payment Processed");
       output.field("Job ID", data.jobId);
       output.field("Accepted", "true");
-      if (data.onChain) output.field("On-Chain Escrow", "Memo created — provider will sign");
+      if (data.onChain) output.field("On-Chain Escrow", "Memo created - provider will sign");
       output.log("");
     });
   } catch (e) {
@@ -201,13 +192,16 @@ export async function evaluate(jobId: string, approve: boolean, reason?: string)
     );
   }
 
-  const numJobId = Number(jobId);
+  const numJobId = parseJobId(
+    jobId,
+    "Usage: yoso-agent job evaluate <jobId> --approve <true|false> [--reason '<text>']"
+  );
 
   try {
     const job = await getJobDetails(numJobId);
 
-    if (job.phase !== 3) {
-      output.fatal(`Job is in phase ${job.phase}, expected 3 (EVALUATION).`);
+    if (job.phase !== JobPhase.EVALUATION) {
+      output.fatal(`Job is in phase ${job.phase}, expected ${JobPhase.EVALUATION} (EVALUATION).`);
     }
 
     let onChainMemoId: string | undefined;
@@ -217,24 +211,15 @@ export async function evaluate(jobId: string, approve: boolean, reason?: string)
       const activeAgent = getActiveAgent();
       if (!activeAgent) output.fatal("No active agent.");
 
-      const pk = process.env.AGENT_PRIVATE_KEY || activeAgent.walletPrivateKey;
-      if (!pk) output.fatal("Private key required for on-chain evaluation.");
-
-      const derivedAddress = new ethers.Wallet(pk).address;
-      if (derivedAddress.toLowerCase() !== activeAgent.walletAddress.toLowerCase()) {
-        output.fatal(
-          `Private key mismatch: derived ${derivedAddress} but active agent is ${activeAgent.walletAddress}.`
-        );
-      }
-
-      const contractClient = new ContractClient(pk);
-      const nextPhase = approve ? 4 : 5; // COMPLETED or REJECTED
+      const wallet = await loadSigningWallet(activeAgent.walletAddress);
+      const contractClient = new ContractClient(wallet.privateKey);
+      const nextPhase = approve ? JobPhase.COMPLETED : JobPhase.REJECTED;
 
       output.log(`  Creating ${approve ? "completion" : "rejection"} memo on-chain...`);
       const memoResult = await contractClient.createMemo({
         jobId: job.onChainJobId,
         content: reason || (approve ? "Approved" : "Rejected"),
-        memoType: 0,
+        memoType: MemoType.MESSAGE,
         isSecured: false,
         nextPhase,
       });
@@ -257,7 +242,14 @@ export async function evaluate(jobId: string, approve: boolean, reason?: string)
       output.heading("Evaluation Submitted");
       output.field("Job ID", data.jobId);
       output.field("Verdict", data.approve ? "APPROVED" : "REJECTED");
-      if (data.onChain) output.field("On-Chain", "Provider will sign — payment auto-releases");
+      if (data.onChain) {
+        output.field(
+          "On-Chain",
+          data.approve
+            ? "Provider will sign - payment releases to provider"
+            : "Provider will sign - escrow refunds to buyer"
+        );
+      }
       output.log("");
     });
   } catch (e) {
@@ -308,8 +300,6 @@ export async function status(jobId: string): Promise<void> {
       deliverable: data.deliverable,
       memoHistory,
     };
-    const linkedBountyId = getBountyByJobId(String(result.jobId))?.bountyId;
-
     output.output(result, (r) => {
       output.heading(`Job ${r.jobId} details`);
       output.field("Phase", r.phase);
@@ -331,10 +321,6 @@ export async function status(jobId: string): Promise<void> {
         for (const m of r.memoHistory) {
           output.log(`    [${m.nextPhase}] ${m.content} (${m.createdAt})`);
         }
-      }
-      if (linkedBountyId) {
-        output.log(`\n  This job is linked to bounty ${linkedBountyId}.`);
-        output.log(`  Run \`yoso-agent bounty status ${linkedBountyId}\` to sync bounty status.\n`);
       }
       output.log("");
     });
@@ -377,12 +363,12 @@ export async function active(options: JobListOptions = {}): Promise<void> {
       }
       for (const j of list) {
         output.field("Job ID", j.id);
-        if (j.phase) output.field("Phase", j.phase);
-        if (j.name) output.field("Name", j.name);
+        if (j.phase) output.field("Phase", String(j.phase));
+        if (j.name) output.field("Name", String(j.name));
         if (j.price != null) output.field("Price", formatPrice(j.price, j.priceType));
-        if (j.clientAddress) output.field("Client", j.clientAddress);
-        if (j.providerAddress) output.field("Provider", j.providerAddress);
-        if (j.deliverable) output.field("Deliverable", j.deliverable);
+        if (j.clientAddress) output.field("Client", String(j.clientAddress));
+        if (j.providerAddress) output.field("Provider", String(j.providerAddress));
+        if (j.deliverable) output.field("Deliverable", String(j.deliverable));
         output.log("");
       }
     });
@@ -409,11 +395,11 @@ export async function completed(options: JobListOptions = {}): Promise<void> {
       }
       for (const j of list) {
         output.field("Job ID", j.id);
-        if (j.name) output.field("Name", j.name);
+        if (j.name) output.field("Name", String(j.name));
         if (j.price != null) output.field("Price", formatPrice(j.price, j.priceType));
-        if (j.clientAddress) output.field("Client", j.clientAddress);
-        if (j.providerAddress) output.field("Provider", j.providerAddress);
-        if (j.deliverable) output.field("Deliverable", j.deliverable);
+        if (j.clientAddress) output.field("Client", String(j.clientAddress));
+        if (j.providerAddress) output.field("Provider", String(j.providerAddress));
+        if (j.deliverable) output.field("Deliverable", String(j.deliverable));
         output.log("");
       }
     });
