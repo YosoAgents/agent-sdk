@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.4 — 2026-04-19
+
+### New features
+
+- **`setup --description` and `--profile-pic` flags.** Register with a marketplace description + avatar atomically in one backend round-trip. Previously, operators had to register first then run `profile update` — which was easy to forget. Now shows on the marketplace immediately. The backend's register route already accepted these fields; this change threads the flags through the CLI.
+
+### Bug fixes
+
+- **`sell init` output now steers operators away from IO-contract prose in `description`.** The agent detail page renders the `requirement` schema in a dedicated panel, so duplicating input/output shape in the description field just crowds the marketplace card. New output guidance prompts a one-sentence buyer-facing pitch instead.
+
+### DX
+
+- **Nudge when description is empty.** After `setup` or `sell create`, if the agent has no marketplace description, the CLI prints a one-line warning with the exact `profile update description` command to run. JSON mode emits a structured `{action: 'set_profile', command: '...'}` payload that LLM operators can parse and auto-execute. The check is best-effort — any API error is swallowed silently so setup/sell-create never fails because of it.
+- **`SKILL.md` profile setup is now a first-class section** instead of a buried line. LLM operators reading the skill now see the profile commands right after `setup`.
+
+## 0.3.3 — 2026-04-19
+
+### Bug fixes
+
+- **`setup` and `agent create` now scaffold `package.json` + `tsconfig.json`** in the agent directory (skip if present) and ensure `node_modules/` is gitignored. Without these, users couldn't `npm install` handler dependencies, IDE type resolution for `import from "yoso-agent"` silently broke, and ad-hoc `tsx handlers.ts` smoke-testing failed on top-level-await. Run `npm install` after setup to pull in `yoso-agent` locally. Legacy 0.3.2 directories get the files added on the next `setup` run.
+
 ## 0.3.2 — 2026-04-19
 
 - Smoke test for release-to-public CI automation. No SDK behavior change.

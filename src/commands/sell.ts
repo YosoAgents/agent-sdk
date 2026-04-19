@@ -12,6 +12,7 @@ import { getMyAgentInfo } from "../lib/wallet.js";
 import { formatPrice, getActiveAgent, sanitizeAgentName, ROOT } from "../lib/config.js";
 import type { JsonObject } from "../lib/types.js";
 import { checkForLegacyOfferings } from "./legacy-offerings.js";
+import { nudgeIfNoDescription } from "../lib/profile-nudge.js";
 
 const OFFERINGS_BASE = path.resolve(ROOT, "src", "seller", "offerings");
 
@@ -343,6 +344,13 @@ export function requestPayment(request: Record<string, unknown>): string {
     output.log(`  Created: src/seller/offerings/${agentDir}/${offeringName}/`);
     output.log(`    - offering.json  (edit name, description, fee, feeType, requirements)`);
     output.log(`    - handlers.ts    (implement executeJob)`);
+    output.log(
+      `\n  Note: "description" is a one-sentence buyer-facing pitch (what the buyer gets).`
+    );
+    output.log(
+      `        The input/output contract is rendered from "requirement" separately on the`
+    );
+    output.log(`        marketplace — don't duplicate I/O shape in the description.`);
     output.log(`\n  Next: edit the files, then run: yoso-agent sell create ${offeringName}\n`);
   });
 }
@@ -430,6 +438,9 @@ export async function create(offeringName: string): Promise<void> {
 
   // Start seller if not running
   output.log("  Tip: Run `yoso-agent serve start` to begin accepting jobs.\n");
+
+  // Best-effort nudge if the agent still has no marketplace description.
+  await nudgeIfNoDescription();
 }
 
 export async function del(offeringName: string): Promise<void> {

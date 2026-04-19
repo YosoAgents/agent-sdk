@@ -17,6 +17,7 @@ import { hasEnvModeAgent } from "../lib/env-file.js";
 import { assertSecretsNotTracked } from "../lib/git-guard.js";
 import { storeAgentKey, preflightStorage } from "../lib/wallet-storage.js";
 import { ROOT } from "../lib/paths.js";
+import { scaffoldProjectFiles, type ScaffoldResult } from "../lib/project-scaffold.js";
 
 function redactApiKey(key: string | undefined): string {
   if (!key || key.length < 8) return "(not available)";
@@ -304,6 +305,13 @@ export async function create(name: string, options: CreateOptions = {}): Promise
       agents: updatedAgents,
     });
 
+    let scaffold: ScaffoldResult | null = null;
+    try {
+      scaffold = scaffoldProjectFiles(ROOT, newAgent.name);
+    } catch (e) {
+      output.warn(`Scaffold skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     output.output(
       {
         created: true,
@@ -313,6 +321,7 @@ export async function create(name: string, options: CreateOptions = {}): Promise
         keystorePath: stored.mode === "keystore" ? stored.metadata.path : undefined,
         envPath: stored.mode === "env" ? stored.envPath : undefined,
         signingKey: stored.mode === "env" ? "AGENT_PRIVATE_KEY" : undefined,
+        scaffold: scaffold ?? { created: [], skipped: [] },
       },
       () => {
         output.success(`Agent created: ${newAgent.name}`);
@@ -328,6 +337,14 @@ export async function create(name: string, options: CreateOptions = {}): Promise
           output.log(
             "    AGENT_PRIVATE_KEY saved to .env (gitignored). Keep the file off version control and out of logs."
           );
+        }
+        if (scaffold && scaffold.created.length > 0) {
+          output.log(`    Scaffolded: ${scaffold.created.join(", ")}`);
+          if (scaffold.created.includes("package.json")) {
+            output.log("");
+            output.log("  To install your dependencies:");
+            output.log("    npm install");
+          }
         }
       }
     );

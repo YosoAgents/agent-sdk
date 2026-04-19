@@ -5,9 +5,11 @@ import { ROOT } from "../lib/paths.js";
 import { hasEnvModeAgent } from "../lib/env-file.js";
 import { assertSecretsNotTracked } from "../lib/git-guard.js";
 import { storeAgentKey, preflightStorage } from "../lib/wallet-storage.js";
-import { createAgentApi, interactiveLogin } from "../lib/auth.js";
+import { createAgentApi, interactiveLogin, type CreateAgentOptions } from "../lib/auth.js";
 import { stopSellerIfRunning, switchAgent } from "./agent.js";
 import { promptFundAndPoll } from "../lib/fund-and-poll.js";
+import { nudgeIfNoDescription } from "../lib/profile-nudge.js";
+import { scaffoldProjectFiles, type ScaffoldResult } from "../lib/project-scaffold.js";
 
 export interface SetupOptions {
   agentName?: string;
@@ -15,6 +17,9 @@ export interface SetupOptions {
   useKeystore?: boolean;
   // When true (or when stdout isn't a TTY), skip the interactive fund-and-poll.
   skipFundPoll?: boolean;
+  // Optional profile fields — sent atomically in the register POST when present.
+  description?: string;
+  profilePic?: string;
 }
 
 function question(rl: readline.Interface, prompt: string): Promise<string> {
@@ -42,13 +47,29 @@ function preflightEnvMode(): void {
 // Only `created` is a new unfunded wallet; selected/switched already exist,
 // so they skip the funding wait loop and the fund JSON action.
 type SetupOutcome =
-  | { kind: "created"; walletAddress: string }
-  | { kind: "selected"; walletAddress: string }
-  | { kind: "switched"; walletAddress: string };
+  | { kind: "created"; walletAddress: string; scaffold: ScaffoldResult | null }
+  | { kind: "selected"; walletAddress: string; scaffold: ScaffoldResult | null }
+  | { kind: "switched"; walletAddress: string; scaffold: ScaffoldResult | null };
+
+// Non-fatal: if scaffolding throws after the agent was created/selected/switched,
+// we still want to surface the primary outcome. Errors are surfaced as warnings.
+function runScaffold(agentName: string): ScaffoldResult | null {
+  try {
+    const result = scaffoldProjectFiles(ROOT, agentName);
+    if (result.created.length > 0) {
+      output.log(`    Scaffolded:   ${result.created.join(", ")}`);
+    }
+    return result;
+  } catch (e) {
+    output.warn(`Scaffold skipped: ${e instanceof Error ? e.message : String(e)}`);
+    return null;
+  }
+}
 
 async function createAndActivateAgent(
   agentName: string,
-  useKeystore: boolean
+  useKeystore: boolean,
+  profile: CreateAgentOptions = {}
 ): Promise<SetupOutcome | null> {
   const trimmedName = agentName.trim();
   if (!trimmedName) {
@@ -73,7 +94,7 @@ async function createAndActivateAgent(
   }
 
   try {
-    const result = await createAgentApi(trimmedName);
+    const result = await createAgentApi(trimmedName, profile);
     if (!result?.apiKey) {
       output.error("Create agent failed — no API key returned.");
       return null;
@@ -125,7 +146,8 @@ async function createAndActivateAgent(
         "    AGENT_PRIVATE_KEY saved to .env (gitignored). Keep the file off version control and out of logs."
       );
     }
-    return { kind: "created", walletAddress: newAgent.walletAddress };
+    const scaffold = runScaffold(newAgent.name);
+    return { kind: "created", walletAddress: newAgent.walletAddress, scaffold };
   } catch (e) {
     output.error(`Create agent failed: ${e instanceof Error ? e.message : String(e)}`);
     return null;
@@ -158,7 +180,8 @@ async function selectOrCreateAgent(
         output.success(`Active agent: ${selected.name} (unchanged)`);
         output.log(`    Wallet:  ${selected.walletAddress}`);
         output.log(`    API Key: ${redactApiKey(selected.apiKey)}\n`);
-        return { kind: "selected", walletAddress: selected.walletAddress };
+        const scaffold = runScaffold(selected.name);
+        return { kind: "selected", walletAddress: selected.walletAddress, scaffold };
       }
 
       if (!useKeystore) {
@@ -181,7 +204,8 @@ async function selectOrCreateAgent(
         await switchAgent(selected.walletAddress);
         output.success(`Active agent: ${selected.name}`);
         output.log(`    Wallet:  ${selected.walletAddress}`);
-        return { kind: "switched", walletAddress: selected.walletAddress };
+        const scaffold = runScaffold(selected.name);
+        return { kind: "switched", walletAddress: selected.walletAddress, scaffold };
       } catch (e) {
         output.error(`Failed to activate agent: ${e instanceof Error ? e.message : String(e)}`);
         return null;
@@ -230,7 +254,10 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
         return;
       }
       output.log("  Create a new agent\n");
-      outcome = await createAndActivateAgent(options.agentName, useKeystore);
+      outcome = await createAndActivateAgent(options.agentName, useKeystore, {
+        description: options.description,
+        profilePic: options.profilePic,
+      });
     } else if (rl) {
       outcome = await selectOrCreateAgent(rl, useKeystore);
     }
@@ -261,6 +288,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
         walletAddress: outcome.walletAddress,
         thresholds: { hype: "0.01", usdc: "0.25" },
         notes: "Send 0.02 HYPE + $1 USDC on HyperEVM (chain 999) to begin serving.",
+        scaffold: outcome.scaffold ?? { created: [], skipped: [] },
       });
     } else if (isFreshlyCreated && outcome) {
       // Non-TTY, non-JSON — just print instructions once and exit.
@@ -271,6 +299,17 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
         "    Send:    0.02 HYPE (gas) + $1 USDC (working capital) on HyperEVM (chain 999)"
       );
       output.log("    USDC:    0xb88339CB7199b77E23DB6E890353E22632Ba630f");
+      output.log("");
+    } else if (outcome && outcome.scaffold?.created.length && output.isJsonMode()) {
+      // Legacy-dir repair: emit a scaffolded notice so JSON consumers can react.
+      output.json({ action: "scaffolded", scaffold: outcome.scaffold });
+    }
+
+    // Tell the user to install deps when we just created package.json. Safe to print
+    // in TTY + non-TTY; JSON mode already surfaces scaffold via the fund/scaffolded action.
+    if (outcome?.scaffold?.created.includes("package.json") && !output.isJsonMode()) {
+      output.log("  To install your dependencies:");
+      output.log("    npm install");
       output.log("");
     }
 
@@ -317,6 +356,10 @@ I have access to the YOSO Agent Marketplace. I can hire specialised agents for t
         }
       }
     }
+
+    // Best-effort: nudge operator to set a marketplace description if none is set.
+    // Never crashes setup — any check failure is swallowed silently.
+    await nudgeIfNoDescription();
 
     // Reached only when a valid agent is configured (bail above on failure).
     output.success("Setup complete. Run `yoso-agent --help` to see available commands.\n");

@@ -54,7 +54,15 @@ interface CreateAgentApiResponse {
   walletPrivateKey?: unknown;
 }
 
-export async function createAgentApi(agentName: string): Promise<AgentKeyResponse> {
+export interface CreateAgentOptions {
+  description?: string;
+  profilePic?: string;
+}
+
+export async function createAgentApi(
+  agentName: string,
+  options: CreateAgentOptions = {}
+): Promise<AgentKeyResponse> {
   const trimmedName = agentName.trim();
   if (!trimmedName) {
     throw new Error("Agent name must be a non-empty string.");
@@ -67,11 +75,16 @@ export async function createAgentApi(agentName: string): Promise<AgentKeyRespons
   const message = buildCanonicalMessage(walletAddress, nonce, iat);
   const signature = await wallet.signMessage(message);
 
+  const trimmedDescription = options.description?.trim();
+  const trimmedProfilePic = options.profilePic?.trim();
+
   const { data } = await client.post<CreateAgentApiResponse>("/agents/register", {
     name: trimmedName,
     walletAddress,
     message,
     signature,
+    ...(trimmedDescription ? { description: trimmedDescription } : {}),
+    ...(trimmedProfilePic ? { profilePic: trimmedProfilePic } : {}),
   });
 
   const serverWallet = (data.agent?.walletAddress ?? "") as string;
