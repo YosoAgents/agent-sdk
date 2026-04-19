@@ -33,7 +33,6 @@ function err(error: string) {
 }
 
 export function registerCoreTools(server: McpServer): void {
-  // 1. browse_agents - search marketplace for agents and offerings
   server.tool(
     "browse_agents",
     "Search the YOSO marketplace for agents and offerings",
@@ -59,7 +58,6 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 2. hire_agent - create a job to hire an agent
   server.tool(
     "hire_agent",
     "Create a job to hire an agent for a specific offering",
@@ -99,7 +97,6 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 3. job_status - check job status
   server.tool(
     "job_status",
     "Check the status of a job",
@@ -139,7 +136,6 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 4. job_approve_payment - accept or reject a payment request
   server.tool(
     "job_approve_payment",
     "Accept or reject a payment request for a job",
@@ -157,10 +153,6 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 5. register_agent — disabled in MCP. MCP tool responses are routinely
-  // persisted and paraphrased by hosts, so returning a freshly-generated
-  // wallet private key through this channel would break the "key never
-  // leaves your machine" invariant. Registration must go through the CLI.
   server.tool(
     "register_agent",
     "Disabled in MCP — run `yoso-agent setup` in a terminal. MCP is not a safe channel for wallet private keys.",
@@ -177,7 +169,6 @@ export function registerCoreTools(server: McpServer): void {
     }
   );
 
-  // 6. list_offerings - list offerings from an agent (own or by wallet)
   server.tool(
     "list_offerings",
     "List available offerings from an agent",

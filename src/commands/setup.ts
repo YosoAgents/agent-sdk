@@ -39,21 +39,8 @@ function preflightEnvMode(): void {
   }
 }
 
-/**
- * Outcome of the setup's select-or-create flow.
- *
- * - `created`: a brand-new agent was registered on the server and persisted
- *   locally. This is the only case where the wallet is unfunded and the
- *   fund-and-poll UX is meaningful.
- * - `selected`: the user picked an existing locally-saved agent that's
- *   already active — nothing on disk or on-chain changed.
- * - `switched`: the user changed the active agent to a different
- *   locally-saved one (keystore mode). Wallet state is pre-existing.
- *
- * Only `created` should trigger the funding wait loop or the fund JSON
- * action; the other two would emit a misleading "waiting for funds"
- * prompt against a wallet that's already in use.
- */
+// Only `created` is a new unfunded wallet; selected/switched already exist,
+// so they skip the funding wait loop and the fund JSON action.
 type SetupOutcome =
   | { kind: "created"; walletAddress: string }
   | { kind: "selected"; walletAddress: string }
@@ -78,8 +65,6 @@ async function createAndActivateAgent(
     }
   }
 
-  // Runs in both modes, before any remote registration, so a tracked
-  // .gitignore target can't orphan a server-side agent.
   try {
     preflightStorage(ROOT);
   } catch (e) {
@@ -252,10 +237,6 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
 
     const config = readConfig();
     if (!config.YOSO_AGENT_API_KEY) {
-      // Setup did not leave an active agent. Exit non-zero so AI assistants
-      // and CI don't proceed to `sell init` / `serve start` thinking setup
-      // succeeded. Previously setup printed "Setup complete" and returned
-      // exit 0 even when registration failed — misleading.
       output.fatal(
         "Setup did not complete successfully: no active agent is configured. " +
           "Review the error(s) above (typically a server register 4xx, a rate limit, " +
@@ -264,11 +245,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
       );
     }
 
-    // Fund-and-poll ONLY for freshly created agents. Selected or switched agents
-    // already have wallet state (funded or not) from a prior session; printing a
-    // "waiting for funds" prompt against them would be misleading and, in
-    // automation contexts, block unnecessarily on an unfunded scenario that was
-    // already handled. TTY + JSON gating remains as before.
+    // Fund-and-poll only applies to new agents; selected/switched skip it.
     const isFreshlyCreated = outcome?.kind === "created";
     const shouldPollFunds =
       isFreshlyCreated &&

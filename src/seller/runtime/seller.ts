@@ -148,10 +148,8 @@ async function handleNewTask(data: JobEventData): Promise<void> {
         reason: "Job accepted",
       });
 
-      // The accept call may advance the job's phase server-side. Re-fetch the
-      // job before posting requestPayment so we don't race the server into a
-      // 409 on an already-advanced state machine. Concretely: if phase is no
-      // longer REQUEST after accept, the requestPayment memo slot is closed.
+      // Re-fetch phase: accept may have advanced the state machine, and
+      // requestPayment returns 409 once the REQUEST memo slot is closed.
       let postAcceptPhase: number | null = null;
       try {
         const details = await getJobDetails(jobId);
@@ -195,9 +193,8 @@ async function handleNewTask(data: JobEventData): Promise<void> {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         if (/409/.test(msg) || /Conflict/i.test(msg)) {
-          // Tolerate a narrow race where the buyer advanced the state machine
-          // between our phase check and the requestPayment POST. Warn rather
-          // than fatal — the downstream phase should still drive delivery.
+          // 409 = buyer advanced state between phase check and POST;
+          // downstream phase still drives delivery, so continue.
           console.warn(
             `[seller] Job ${jobId} requestPayment returned 409 after phase check; job state advanced concurrently — continuing.`
           );

@@ -13,10 +13,8 @@ import { formatPrice, getActiveAgent, sanitizeAgentName, ROOT } from "../lib/con
 import type { JsonObject } from "../lib/types.js";
 import { checkForLegacyOfferings } from "./legacy-offerings.js";
 
-/** Offerings base: src/seller/offerings/ */
 const OFFERINGS_BASE = path.resolve(ROOT, "src", "seller", "offerings");
 
-/** Offerings root for the current agent: src/seller/offerings/<agent-name>/ */
 function getOfferingsRoot(): string {
   const agent = getActiveAgent();
   if (!agent) {

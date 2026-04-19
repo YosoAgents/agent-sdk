@@ -112,8 +112,7 @@ function displayAgents(agents: AgentEntry[]): void {
 }
 
 export async function list(): Promise<void> {
-  // In 0.3.0 the SDK is key-based (no session tokens). The old `/api/agents/lite`
-  // server-sync endpoint was never implemented, so local config is authoritative.
+  // Local config is authoritative — no server-side agent list endpoint.
   const agents: AgentEntry[] = readConfig().agents ?? [];
 
   if (agents.length === 0) {
@@ -243,7 +242,6 @@ export async function create(name: string, options: CreateOptions = {}): Promise
   const useKeystore = options.useKeystore ?? false;
 
   if (!useKeystore) {
-    // Env-mode preflight: refuse if writes would leak, or overwrite existing agent.
     try {
       assertSecretsNotTracked(ROOT, [".env", "config.json"]);
       if (hasEnvModeAgent(ROOT)) {
@@ -259,8 +257,6 @@ export async function create(name: string, options: CreateOptions = {}): Promise
     }
   }
 
-  // Runs in both modes, before any remote registration, so a tracked
-  // .gitignore target can't orphan a server-side agent.
   try {
     preflightStorage(ROOT);
   } catch (e) {

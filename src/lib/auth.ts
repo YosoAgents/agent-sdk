@@ -4,10 +4,6 @@ import * as output from "./output.js";
 import { readConfig, writeConfig, type AgentEntry } from "./config.js";
 import client from "./client.js";
 
-// Registration: wallet is generated locally, the SDK signs a canonical
-// EIP-191 message proving ownership, the server verifies the signature.
-// The private key never leaves the machine.
-
 export interface AgentInfoResponse {
   id: string;
   name: string;
@@ -137,10 +133,6 @@ export async function isAgentApiKeyValid(apiKey: string): Promise<boolean> {
     .then(() => true)
     .catch(() => false);
 }
-
-// Server-side agent list + session tokens are not implemented; the SDK is
-// key-based and the local config is authoritative. The no-ops below keep
-// older callers from crashing.
 
 export async function fetchAgents(): Promise<AgentInfoResponse[]> {
   return [];

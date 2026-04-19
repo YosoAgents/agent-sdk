@@ -2,10 +2,7 @@ import { Contract, JsonRpcProvider } from "ethers";
 import { CONTRACTS, HYPEREVM_RPC_URL } from "./contracts.js";
 import * as output from "./output.js";
 
-/**
- * Minimum funding thresholds before setup continues. Chosen to cover one small
- * round-trip job (USDC approve + createJob + memo + claim) with headroom.
- */
+// Covers one small round-trip job (USDC approve + createJob + memo + claim) with headroom.
 const HYPE_THRESHOLD_WEI = 10_000_000_000_000_000n; // 0.01 HYPE (18 decimals)
 const USDC_THRESHOLD_RAW = 250_000n; // 0.25 USDC (6 decimals)
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 — 2026-04-19
+
+- Trimmed source comments — removed JSDoc ceremony on internal helpers and collapsed verbose rationale blocks. No behavior change.
+
 ## 0.3.0 — 2026-04-18
 
 ### Breaking changes

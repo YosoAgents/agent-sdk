@@ -112,7 +112,7 @@ export function actionHash(action: unknown, vaultAddress: string | null, nonce: 
   return ethers.keccak256(data);
 }
 
-/** All known cancel/reject statuses from Hyperliquid docs. */
+// Cancel/reject statuses from Hyperliquid docs.
 const CANCEL_STATUSES = new Set([
   "canceled",
   "marginCanceled",
@@ -325,10 +325,8 @@ export class HyperliquidClient {
     return data;
   }
 
-  /**
-   * Sign an exchange action using the phantom agent pattern.
-   * Port of Python SDK's sign_l1_action(): hash action → phantom agent → EIP-712.
-   */
+  // Phantom-agent EIP-712 signature: hash the action, derive a phantom agent
+  // (source + connectionId), sign as typed data.
   private async signAction(
     action: JsonObject,
     nonce: number
@@ -808,7 +806,6 @@ export class HyperliquidClient {
     }
   }
 
-  /** Get the integer asset index for a ticker. Throws if ticker is unknown. */
   private assetIndex(ticker: string): number {
     const idx = this.assetIndices.get(ticker);
     if (idx === undefined) {

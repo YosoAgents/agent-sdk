@@ -22,31 +22,12 @@ export interface StoreAgentKeyParams {
   warn: (msg: string) => void;
 }
 
-/**
- * Files and directories both storage modes write that must stay out of git.
- * - `config.json` holds the agent's API key (bearer credential).
- * - `.env` holds AGENT_PRIVATE_KEY (env mode only, but gitignored unconditionally
- *   because the user may also use env mode in the future from the same dir).
- * - `keystores/` holds encrypted wallet blobs (keystore mode).
- * - `logs/` contains seller runtime logs that may echo request payloads.
- */
 const SDK_GITIGNORE_ENTRIES = [".env", "config.json", "keystores/", "logs/"];
 
-/**
- * Storage preflight. Runs in both env and keystore modes. MUST be called
- * before any remote agent registration: `ensureGitignored` throws if
- * required entries can't be added because the target files are tracked,
- * and if that throw comes after `createAgentApi`, the user is left with
- * an orphaned server-side agent and no locally saved credentials.
- */
 export function preflightStorage(root: string): void {
   ensureGitignored(root, SDK_GITIGNORE_ENTRIES);
 }
 
-/** Persist the wallet key (`.env` managed block or encrypted keystore) and update
- *  `process.env.AGENT_PRIVATE_KEY` / `YOSO_AGENT_API_KEY` for the current process.
- *  Caller must run `preflightStorage(root)` before `createAgentApi` to keep
- *  local write failures from orphaning a remote agent. */
 export async function storeAgentKey(params: StoreAgentKeyParams): Promise<StoredWalletKey> {
   const { root, privateKey, walletAddress, apiKey, useKeystore, warn } = params;
 
