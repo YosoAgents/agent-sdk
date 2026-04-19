@@ -13,13 +13,8 @@ dotenv.config({ path: path.resolve(ROOT, ".env") });
 loadApiKey();
 
 /**
- * Normalize YOSO_API_URL to always end with exactly one `/api` segment so SDK
- * call-sites can use `/agents/...` paths uniformly. Idempotent against
- * user-provided `host`, `host/`, `host/api`, or `host/api/`.
- *
- * Historical bug (#9, fixed 0.3.0): SDK paths omitted `/api/` prefix, so
- * `YOSO_API_URL=https://host` would 404 on every call. Users worked around by
- * appending `/api` manually; centralizing here lets both shapes work.
+ * Normalize YOSO_API_URL to end with exactly one `/api` segment. Idempotent
+ * against `host`, `host/`, `host/api`, and `host/api/`.
  */
 export function apiBaseUrl(): string {
   const envValue = process.env.YOSO_API_URL?.trim();

@@ -4,16 +4,9 @@ import * as output from "./output.js";
 import { readConfig, writeConfig, type AgentEntry } from "./config.js";
 import client from "./client.js";
 
-/**
- * v0.3.0 register flow:
- *   - Wallet generated client-side. Server never sees the private key.
- *   - SDK signs a canonical EIP-191 message proving ownership of the claimed address.
- *   - Server atomically claims the nonce (Redis SET NX EX) and verifies the sig.
- *   - Response includes only `{agent, apiKey}`. The SDK keeps the private key locally.
- *
- * The previous session-based browser-auth flow (`/api/auth/lite/*`, `/api/agents/lite`)
- * was never implemented server-side. Those code paths are removed in 0.3.0.
- */
+// Registration: wallet is generated locally, the SDK signs a canonical
+// EIP-191 message proving ownership, the server verifies the signature.
+// The private key never leaves the machine.
 
 export interface AgentInfoResponse {
   id: string;
@@ -62,14 +55,9 @@ interface CreateAgentApiResponse {
     walletAddress?: unknown;
   };
   apiKey?: unknown;
-  // Defense: reject responses that still carry this legacy field.
   walletPrivateKey?: unknown;
 }
 
-/**
- * Create a new agent. SDK 0.3.0+ generates the wallet locally, signs the canonical
- * registration message, and posts only the public address + signature to the server.
- */
 export async function createAgentApi(agentName: string): Promise<AgentKeyResponse> {
   const trimmedName = agentName.trim();
   if (!trimmedName) {
@@ -90,22 +78,15 @@ export async function createAgentApi(agentName: string): Promise<AgentKeyRespons
     signature,
   });
 
-  // Split-brain defense: server MUST echo the address we claimed.
   const serverWallet = (data.agent?.walletAddress ?? "") as string;
   if (typeof serverWallet !== "string" || serverWallet.toLowerCase() !== walletAddress) {
     throw new Error(
-      `Server returned wallet ${serverWallet || "(missing)"}, expected ${walletAddress}. ` +
-        `Likely an SDK/server version mismatch — upgrade both or contact support.`
+      `Server returned wallet ${serverWallet || "(missing)"}, expected ${walletAddress}.`
     );
   }
 
-  // Legacy response-shape defense: a 0.2.x-era backend shouldn't echo walletPrivateKey
-  // back to us any more. If it does, refuse to continue — something is very wrong.
   if (data.walletPrivateKey !== undefined) {
-    throw new Error(
-      "Server returned a walletPrivateKey, which is forbidden in the new flow. " +
-        "Refusing to continue — server is on an old/legacy code path."
-    );
+    throw new Error("Server returned a walletPrivateKey. Refusing to continue.");
   }
 
   return {
@@ -157,40 +138,23 @@ export async function isAgentApiKeyValid(apiKey: string): Promise<boolean> {
     .catch(() => false);
 }
 
-/**
- * Session-based agent list was served by `/api/agents/lite`, an endpoint that was never
- * implemented server-side. In 0.3.0 the SDK is key-based only — no session tokens.
- *
- * Kept as a graceful no-op so `agent list` / `setup` don't crash. Local `config.agents`
- * is authoritative until the server exposes a key-based equivalent in a future release.
- */
+// Server-side agent list + session tokens are not implemented; the SDK is
+// key-based and the local config is authoritative. The no-ops below keep
+// older callers from crashing.
+
 export async function fetchAgents(): Promise<AgentInfoResponse[]> {
   return [];
 }
 
-/**
- * No-op kept for backward compatibility with `yoso-agent login`. The browser auth
- * endpoints were never implemented. Users should run `yoso-agent setup` instead.
- */
 export async function interactiveLogin(): Promise<void> {
-  output.log("  `yoso-agent login` is a no-op in 0.3.0.");
-  output.log("  Browser-based auth is not available; the SDK is key-based.\n");
+  output.log("  `yoso-agent login` is a no-op — browser auth is not available.");
   output.log("  Run `yoso-agent setup --name <name> --yes` to create a new agent.\n");
 }
 
-/**
- * Always returns null in 0.3.0 (no session tokens). Callers fall back to local
- * config and direct key-based API calls.
- */
 export function getValidSessionToken(): null {
   return null;
 }
 
-/**
- * Merge server agents into local config. Returns the merged list.
- * In 0.3.0 `fetchAgents` always returns [], so this is effectively a pass-through
- * of local config. Kept to minimize churn in callers until 0.4.0.
- */
 export function syncAgentsToConfig(serverAgents: AgentInfoResponse[]): AgentEntry[] {
   const config = readConfig();
   const localAgents = config.agents ?? [];

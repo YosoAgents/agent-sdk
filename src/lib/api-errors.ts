@@ -6,14 +6,7 @@ export function safeApiErrorCode(data: unknown): string | undefined {
   return typeof code === "string" && SAFE_ERROR_CODE.test(code) ? code : undefined;
 }
 
-/**
- * Extract a human-readable error string from an axios-style error payload.
- * The YOSO backend consistently uses `body.error` (string). Some routes also
- * return `body.message`. We prefer `error` and fall back to `message`.
- *
- * Returns a trimmed string capped at 500 chars so we don't blow up logs if
- * the server returns something huge. Returns undefined if nothing useful.
- */
+// Prefer `body.error`, fall back to `body.message`. Trim + cap at 500 chars.
 export function safeApiErrorBody(data: unknown): string | undefined {
   if (!data || typeof data !== "object") return undefined;
   const obj = data as { error?: unknown; message?: unknown };
