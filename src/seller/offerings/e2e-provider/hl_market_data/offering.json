@@ -1,7 +1,0 @@
-{
-  "name": "hl_market_data",
-  "description": "Real-time Hyperliquid market data: mid prices, L2 orderbook, and hourly candles for any perp or spot asset",
-  "jobFee": 10,
-  "jobFeeType": "fixed",
-  "requiredFunds": false
-}

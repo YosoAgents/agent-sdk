@@ -18,7 +18,7 @@ export interface StoreAgentKeyParams {
   walletAddress: string;
   apiKey: string;
   useKeystore: boolean;
-  /** Emit a user-facing warning when env-mode residue is cleared on keystore write. */
+  // Emit a user-facing warning when env-mode residue is cleared on keystore write.
   warn: (msg: string) => void;
 }
 

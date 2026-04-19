@@ -41,15 +41,8 @@ function formatUsdc(raw: bigint): string {
   return `${whole}.${fracStr}`;
 }
 
-/**
- * Print a funding prompt and poll the wallet for HYPE + USDC arrival.
- *
- * Returns when both thresholds are met, or when the timeout elapses. Does not
- * throw on timeout — the user can always re-run setup or continue manually.
- *
- * Caller is responsible for gating on TTY / JSON-mode; this helper is only
- * invoked when interactive polling is appropriate.
- */
+// Prints a funding prompt and polls for HYPE + USDC. Returns on both thresholds
+// or timeout (does not throw on timeout). Caller must gate on TTY / JSON-mode.
 export async function promptFundAndPoll(walletAddress: string): Promise<void> {
   output.log("");
   output.log("  Fund your agent to go live:");

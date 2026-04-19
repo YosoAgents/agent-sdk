@@ -45,7 +45,7 @@ export class ContractClient {
     return await this.usdc.balanceOf(this.wallet.address);
   }
 
-  /** Max single approval: 10,000 USDC (6 decimals). Override via maxApproval param. */
+  // Max single approval: 10,000 USDC (6 decimals). Override via maxApproval param.
   static readonly DEFAULT_MAX_APPROVAL = 10_000n * 10n ** 6n;
 
   async approveUSDC(

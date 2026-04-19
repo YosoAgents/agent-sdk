@@ -22,10 +22,10 @@ function findSdkRoot(): string {
   return path.resolve(__dirname, "..", "..");
 }
 
-/** Installed SDK package root, used for packaged runtime/assets. */
+// Installed SDK package root, used for packaged runtime/assets.
 export const SDK_ROOT = findSdkRoot();
 
-/** User workspace root where config, logs, offerings, and deploy files live. */
+// User workspace root where config, logs, offerings, and deploy files live.
 export const ROOT = process.env.YOSO_AGENT_ROOT?.trim()
   ? path.resolve(process.env.YOSO_AGENT_ROOT.trim())
   : process.cwd();

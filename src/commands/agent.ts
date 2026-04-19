@@ -53,12 +53,8 @@ async function killSellerProcess(pid: number): Promise<boolean> {
   return false;
 }
 
-/**
- * Check if seller runtime is running. If so, warn the user and ask for
- * confirmation to stop it. Returns true if it's safe to proceed (no seller
- * running, or seller was stopped). Returns false if the user cancelled.
- * Calls output.fatal (exits) if the seller could not be killed.
- */
+// Returns true if safe to proceed (no seller running or user confirmed stop).
+// Returns false if the user cancelled. Calls output.fatal if the kill failed.
 export async function stopSellerIfRunning(): Promise<boolean> {
   const sellerPid = findSellerPid();
   if (sellerPid === undefined) return true;

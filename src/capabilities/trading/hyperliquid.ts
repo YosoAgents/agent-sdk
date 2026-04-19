@@ -50,7 +50,7 @@ interface PositionPayload {
   liquidationPx?: string | null;
 }
 
-/** Normalize a float to wire format. Matches Python SDK's float_to_wire(). */
+// Normalize a float to wire format. Matches Python SDK's float_to_wire().
 export function floatToWire(x: number): string {
   const rounded = x.toFixed(8);
   if (Math.abs(parseFloat(rounded) - x) >= 1e-12) {
@@ -86,10 +86,8 @@ export function normalizeAction<T>(obj: T): T {
   return result as T;
 }
 
-/**
- * Hash an action for signing. Port of Python SDK's action_hash().
- * msgpack(action) + nonce(8B BE) + vaultFlag(1B) [+ vaultAddr(20B)] → keccak256
- */
+// msgpack(action) + nonce(8B BE) + vaultFlag(1B) [+ vaultAddr(20B)] → keccak256
+// Matches Python SDK's action_hash().
 export function actionHash(action: unknown, vaultAddress: string | null, nonce: number): string {
   const normalized = normalizeAction(action);
   const msgpackBytes = encode(normalized);
@@ -214,7 +212,7 @@ export class HyperliquidClient {
     });
   }
 
-  /** Load metadata from exchange. Call once after construction. */
+  // Load metadata from exchange. Call once after construction.
   async initialize(): Promise<void> {
     await this.loadMeta();
   }
@@ -248,7 +246,7 @@ export class HyperliquidClient {
     }
   }
 
-  /** Resolve user-supplied ticker to canonical form. */
+  // Resolve user-supplied ticker to canonical form.
   resolveTicker(raw: string): string {
     const stripped = raw.trim();
     let canonical: string;
@@ -293,12 +291,12 @@ export class HyperliquidClient {
     return { native, xyz };
   }
 
-  /** Round price to 5 significant figures (Hyperliquid requirement). */
+  // Round price to 5 significant figures (Hyperliquid requirement).
   static roundPrice(price: number): number {
     return parseFloat(price.toPrecision(5));
   }
 
-  /** Convert USD notional to contract size, rounded to szDecimals. */
+  // Convert USD notional to contract size, rounded to szDecimals.
   usdToContracts(ticker: string, price: number, sizeUsd: number): number {
     if (price <= 0) return 0;
     const raw = sizeUsd / price;

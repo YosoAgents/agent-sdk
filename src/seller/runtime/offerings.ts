@@ -26,10 +26,8 @@ function isPathInside(root: string, target: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-/**
- * Load a named offering from `src/seller/offerings/<agentDirName>/<name>/`.
- * Expects `offering.json` and `handlers.ts` in that directory.
- */
+// Load a named offering from `src/seller/offerings/<agentDirName>/<name>/`.
+// Expects `offering.json` and `handlers.ts` in that directory.
 export async function loadOffering(
   offeringName: string,
   agentDirName: string

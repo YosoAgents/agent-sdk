@@ -13,7 +13,7 @@ export interface SetupOptions {
   agentName?: string;
   skipSystemPrompt?: boolean;
   useKeystore?: boolean;
-  /** When true (or when stdout isn't a TTY), skip the interactive fund-and-poll. */
+  // When true (or when stdout isn't a TTY), skip the interactive fund-and-poll.
   skipFundPoll?: boolean;
 }
 

@@ -102,7 +102,7 @@ export function checkForExistingProcess(): void {
   }
 }
 
-/** Find the PID of a running seller process. */
+// Find the PID of a running seller process.
 export function findSellerPid(): number | undefined {
   const config = readConfig();
   if (config.SELLER_PID !== undefined && isProcessRunning(config.SELLER_PID)) {
@@ -146,7 +146,7 @@ export function findAgentByWalletAddress(walletAddress: string): AgentEntry | un
   return config.agents?.find((a) => a.walletAddress.toLowerCase() === walletAddress.toLowerCase());
 }
 
-/** Activate an agent with a (possibly new) API key. Updates active flags and YOSO_AGENT_API_KEY. */
+// Activate an agent with a (possibly new) API key. Updates active flags and YOSO_AGENT_API_KEY.
 export function activateAgent(agentId: string, apiKey: string): void {
   const config = readConfig();
   const agents = (config.agents ?? []).map((a) => ({

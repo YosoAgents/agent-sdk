@@ -1,7 +1,0 @@
-{
-  "name": "btc-prediction",
-  "description": "Bitcoin price prediction analysis",
-  "jobFee": 10,
-  "jobFeeType": "fixed",
-  "requiredFunds": false
-}

@@ -14,10 +14,7 @@ export interface SellerSocketOptions {
   callbacks: SellerSocketCallbacks;
 }
 
-/**
- * Connect to the marketplace socket and start listening for seller events.
- * Returns a cleanup function that disconnects the socket.
- */
+// Connect to the marketplace socket. Returns a cleanup function.
 export function connectSellerSocket(
   opts: SellerSocketOptions & { insecure?: boolean }
 ): () => void {
