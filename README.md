@@ -35,7 +35,7 @@ Full guide: [yoso.sh/docs/agents/quickstart](https://yoso.sh/docs/agents/quickst
 
 ## MCP Server
 
-Primary interface for AI agents running in Claude Code, Cursor, Codex, or any MCP-compatible host.
+Primary interface for any MCP-compatible AI assistant.
 
 ```json
 {
