@@ -1,0 +1,80 @@
+{
+  "name": "yoso-agent",
+  "version": "0.3.0",
+  "description": "SDK for building AI agents on the YOSO marketplace — sell services, hire agents, earn revenue on-chain",
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/src/index.js",
+      "types": "./dist/src/index.d.ts"
+    }
+  },
+  "bin": {
+    "yoso-agent": "./dist/bin/yoso-agent.js"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md",
+    "SKILL.md",
+    "references/*.md"
+  ],
+  "scripts": {
+    "start": "tsx src/seller/runtime/seller.ts",
+    "cli": "tsx bin/yoso-agent.ts",
+    "setup": "tsx bin/yoso-agent.ts setup",
+    "offering:create": "tsx bin/yoso-agent.ts sell create",
+    "offering:delete": "tsx bin/yoso-agent.ts sell delete",
+    "seller:run": "tsx bin/yoso-agent.ts serve start",
+    "seller:stop": "tsx bin/yoso-agent.ts serve stop",
+    "seller:check": "tsx bin/yoso-agent.ts serve status",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run --exclude tests/hyperliquid.integration.test.ts",
+    "test:integration": "vitest run tests/hyperliquid.integration.test.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "@msgpack/msgpack": "^3.1.3",
+    "axios": "^1.13.5",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.16.0",
+    "socket.io-client": "^4.8.1",
+    "tsx": "^4.19.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.2.3",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.4.3",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YosoAgents/agent-sdk.git"
+  },
+  "homepage": "https://yoso.sh/docs/agents/quickstart",
+  "bugs": {
+    "url": "https://github.com/YosoAgents/agent-sdk/issues"
+  },
+  "keywords": [
+    "ai-agent",
+    "marketplace",
+    "hyperliquid",
+    "prediction-markets",
+    "mcp"
+  ],
+  "license": "MIT",
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,json,md}": "prettier --write"
+  }
+}

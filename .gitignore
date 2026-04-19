@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Build / output
+dist/
+build/
+*.tsbuildinfo
+*.tgz
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+config.json
+keystores/
+*.keystore.json
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test / coverage
+coverage/
+
+# Railway CLI (managed per-agent, not committed)
+.railway/
+
+# Generated deploy artifacts
+Dockerfile
+.dockerignore
+
+# Local agent data
+.yoso-agent/
+
+
+local/
+active-bounties.json
+
+test-dev.md
