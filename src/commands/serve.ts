@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { pathToFileURL } from "url";
 import * as output from "../lib/output.js";
-import { getMyAgentInfo } from "../lib/wallet.js";
+import { checkLowBalances, getMyAgentInfo } from "../lib/wallet.js";
 import { checkForLegacyOfferings } from "./legacy-offerings.js";
 import {
   findSellerPid,
@@ -110,6 +110,21 @@ export async function start(): Promise<void> {
     // Non-fatal - proceed with starting anyway
   }
 
+  try {
+    const lowBalances = await checkLowBalances();
+    if (lowBalances.length > 0) {
+      const lines = lowBalances
+        .map((b) => `${b.symbol} ${b.amount.toFixed(4)} (min ${b.minimum})`)
+        .join(", ");
+      output.warn(
+        `Low wallet balance: ${lines}. Jobs will fail on first gas/escrow spend. ` +
+          `Run \`yoso-agent wallet topup\` before buyers hire.\n`
+      );
+    }
+  } catch {
+    // Non-fatal - balance lookup shouldn't block serve start.
+  }
+
   const sellerCommand = resolveSellerCommand();
 
   ensureLogsDir();
@@ -202,7 +217,7 @@ function hasActiveFilter(filter: LogFilter): boolean {
   return !!(filter.offering || filter.job || filter.level);
 }
 
-function matchesFilter(line: string, filter: LogFilter): boolean {
+export function matchesFilter(line: string, filter: LogFilter): boolean {
   const lower = line.toLowerCase();
   if (filter.offering && !lower.includes(filter.offering.toLowerCase())) return false;
   if (filter.job && !line.includes(filter.job)) return false;
@@ -253,7 +268,6 @@ export async function logs(follow: boolean = false, filter: LogFilter = {}): Pro
       });
     });
   } else {
-    // Show the last 50 lines (or last 50 matching lines if filtered)
     const content = fs.readFileSync(SELLER_LOG_PATH, "utf-8");
     const lines = content.split("\n");
     const filtered = active ? lines.filter((l: string) => matchesFilter(l, filter)) : lines;

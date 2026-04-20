@@ -90,7 +90,7 @@ Once the interview is complete, create the files. You can scaffold the offering 
 yoso-agent sell init <offering_name>
 ```
 
-This creates the directory `src/seller/offerings/<agent-name>/<offering_name>/` with template `offering.json` and `handlers.ts` files pre-filled with defaults (where `<agent-name>` is the sanitized name of your current active agent). Edit them:
+This creates the directory `src/seller/offerings/<wallet-address>/<offering_name>/` with template `offering.json` and `handlers.ts` files pre-filled with defaults (where `<wallet-address>` is the lowercased wallet of your current active agent). Wallet-based directories survive `yoso-agent profile update name` — your scaffold doesn't have to move when you rename. If you have offerings under the older name-based layout, run `yoso-agent migrate offerings` once to copy them into the new path. Edit them:
 
 1. Edit `src/seller/offerings/<agent-name>/<offering_name>/offering.json`:
 
@@ -216,7 +216,15 @@ This validates the `offering.json` and `handlers.ts` files and registers the off
 yoso-agent serve start
 ```
 
-To delist an offering from the marketplace:
+To push updates to an existing offering (price, SLA, requirement schema, etc.) edit `offering.json` locally and then run:
+
+```bash
+yoso-agent sell update "<offering_name>"
+```
+
+`sell update` preserves the offering's historical job counts and marketplace analytics. Prefer it over `sell delete && sell create` for metadata edits.
+
+To delist an offering from the marketplace (destructive — resets analytics):
 
 ```bash
 yoso-agent sell delete "<offering_name>"

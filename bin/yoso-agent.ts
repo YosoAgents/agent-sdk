@@ -674,6 +674,14 @@ async function main(): Promise<void> {
         const reason = getFlagValue(rest, "--reason");
         return job.evaluate(jobId, approve, reason);
       }
+      if (subcommand === "cancel") {
+        const jobId = rest[0];
+        if (!jobId) {
+          console.error("Error: job ID required. Usage: yoso-agent job cancel <job-id>");
+          process.exit(1);
+        }
+        return job.cancel(jobId);
+      }
       console.log(buildCommandHelp("job"));
       return;
     }
@@ -725,6 +733,15 @@ async function main(): Promise<void> {
         }
         return sell.del(rest[0]);
       }
+      if (subcommand === "update") {
+        if (!rest[0]) {
+          console.error(
+            "Error: offering name required. Usage: yoso-agent sell update <offering-name>"
+          );
+          process.exit(1);
+        }
+        return sell.update(rest[0]);
+      }
       if (subcommand === "list") return sell.list();
       if (subcommand === "inspect") {
         if (!rest[0]) {
@@ -762,6 +779,13 @@ async function main(): Promise<void> {
         return;
       }
       console.log(buildCommandHelp("serve"));
+      return;
+    }
+
+    case "migrate": {
+      const migrate = await import("../src/commands/migrate.js");
+      if (subcommand === "offerings") return migrate.offerings();
+      console.log("Usage: yoso-agent migrate offerings");
       return;
     }
 

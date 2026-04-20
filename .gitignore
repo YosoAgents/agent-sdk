@@ -49,3 +49,7 @@ local/
 active-bounties.json
 
 test-dev.md
+
+# Claude Code local state (never commit — release-public.sh also scrubs these)
+.claude/
+CLAUDE.local.md

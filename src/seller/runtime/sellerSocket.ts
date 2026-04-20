@@ -14,10 +14,21 @@ export interface SellerSocketOptions {
   callbacks: SellerSocketCallbacks;
 }
 
-// Connect to the marketplace socket. Returns a cleanup function.
+export interface SellerSocketHandle {
+  disconnect: () => void;
+  // Resolves on first `roomJoined` event; rejects after 30s if the socket
+  // never reaches a ready state. Startup code should `await` this before
+  // running any HTTP cleanup that depends on a subscribed socket.
+  ready: Promise<void>;
+}
+
+const READY_TIMEOUT_MS = 30_000;
+
+// Connect to the marketplace socket. Returns a handle with `disconnect` and
+// a single-fire `ready` promise that resolves on the initial room join.
 export function connectSellerSocket(
   opts: SellerSocketOptions & { insecure?: boolean }
-): () => void {
+): SellerSocketHandle {
   const { marketplaceUrl, apiKey, callbacks, insecure } = opts;
 
   if (!insecure && !/^https:\/\//i.test(marketplaceUrl)) {
@@ -35,9 +46,29 @@ export function connectSellerSocket(
     reconnectionDelayMax: 30000,
   });
 
+  let hasJoinedOnce = false;
+  let resolveReady: () => void;
+  let rejectReady: (err: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const readyTimeout = setTimeout(() => {
+    if (!hasJoinedOnce) {
+      rejectReady(new Error(`socket never joined room within ${READY_TIMEOUT_MS}ms`));
+    }
+  }, READY_TIMEOUT_MS);
+  // Node-specific: don't keep the event loop alive solely for this timer.
+  if (typeof readyTimeout.unref === "function") readyTimeout.unref();
+
   socket.on(SocketEvent.ROOM_JOINED, (_data: unknown, callback?: (ack: boolean) => void) => {
     console.log("[socket] Joined marketplace room");
     if (typeof callback === "function") callback(true);
+    if (!hasJoinedOnce) {
+      hasJoinedOnce = true;
+      clearTimeout(readyTimeout);
+      resolveReady();
+    }
   });
 
   socket.on(SocketEvent.ON_NEW_TASK, (data: JobEventData, callback?: (ack: boolean) => void) => {
@@ -90,5 +121,5 @@ export function connectSellerSocket(
     process.exit(0);
   });
 
-  return disconnect;
+  return { disconnect, ready };
 }

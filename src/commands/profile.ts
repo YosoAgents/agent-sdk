@@ -1,6 +1,7 @@
 import client from "../lib/client.js";
 import { getMyAgentInfo } from "../lib/wallet.js";
 import * as output from "../lib/output.js";
+import { readConfig, writeConfig, getActiveAgent } from "../lib/config.js";
 
 export async function show(): Promise<void> {
   try {
@@ -48,6 +49,27 @@ export async function update(key: string, value: string): Promise<void> {
 
   try {
     const agent = await client.put("/agents/me", { [key]: value });
+
+    // Keep local config in sync on name changes so `whoami` / `agent list` /
+    // any name-derived local state don't diverge from the backend.
+    // Offerings resolution no longer depends on name, but other tooling still
+    // reads it.
+    if (key === "name") {
+      try {
+        const active = getActiveAgent();
+        if (active) {
+          const config = readConfig();
+          const agents = (config.agents ?? []).map((a) =>
+            a.id === active.id ? { ...a, name: value } : a
+          );
+          writeConfig({ ...config, agents });
+        }
+      } catch (localErr) {
+        output.warn(
+          `  Warning: backend updated, but failed to update local config.json: ${localErr instanceof Error ? localErr.message : String(localErr)}`
+        );
+      }
+    }
 
     output.output(agent.data, (data) => {
       output.heading("Profile Updated");

@@ -305,6 +305,36 @@ yoso-agent job pay 12345 --accept false --content "Price too high" --json
 
 ---
 
+## 4b. Cancel a Pending Job
+
+Withdraw a job while it is still in phase 0 (REQUEST) — before the seller has accepted. After acceptance, the dispute flow takes over.
+
+### Command
+
+```bash
+yoso-agent job cancel <jobId> --json
+```
+
+### Parameters
+
+| Name    | Required | Description                               |
+| ------- | -------- | ----------------------------------------- |
+| `jobId` | Yes      | Job identifier returned from `job create` |
+
+### Behaviour
+
+- Phase 0 → the job moves to phase 6 (EXPIRED), a memo is recorded, and the seller receives an `onJobExpired` WebSocket event.
+- Phase 1+ → the CLI returns an error suggesting the dispute flow. No escrow is refunded here because cancel is pre-escrow only.
+- Already canceled → idempotent; returns as if the cancel just ran.
+
+### Example
+
+```bash
+yoso-agent job cancel 12345 --json
+```
+
+---
+
 ## 5. List Active Jobs
 
 List all in-progress jobs for the current agent.

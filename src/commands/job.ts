@@ -4,6 +4,7 @@ import { formatPrice, getActiveAgent } from "../lib/config.js";
 import * as output from "../lib/output.js";
 import { processNegotiationPhase, getJobDetails, reportEscrow } from "../lib/api.js";
 import { ContractClient } from "../lib/contract-client.js";
+import { phaseLabel } from "../lib/phase-labels.js";
 import { JobPhase, MemoType } from "../seller/runtime/types.js";
 import type { JsonObject } from "../lib/types.js";
 import { loadSigningWallet } from "../lib/keystore.js";
@@ -26,7 +27,11 @@ export async function create(
   }
 
   try {
-    const job = await client.post<{ data?: { jobId: number }; jobId?: number }>("/agents/jobs", {
+    const job = await client.post<{
+      data?: { jobId: number; expiredAt?: number };
+      jobId?: number;
+      expiredAt?: number;
+    }>("/agents/jobs", {
       providerWalletAddress: agentWalletAddress,
       jobOfferingName,
       serviceRequirements,
@@ -37,10 +42,54 @@ export async function create(
     output.output(job.data, (data) => {
       output.heading("Job Created");
       output.field("Job ID", data.data?.jobId ?? data.jobId);
-      output.log("\n  Job submitted. Use `yoso-agent job status <jobId>` to check progress.\n");
+      const expiredAt = data.data?.expiredAt ?? data.expiredAt;
+      if (typeof expiredAt === "number" && Number.isFinite(expiredAt)) {
+        output.log(`\n  Expires at ${new Date(expiredAt).toISOString()} if not accepted.`);
+        output.log(
+          `  Cancel while still in phase 0 with: yoso-agent job cancel ${data.data?.jobId ?? data.jobId}\n`
+        );
+      } else {
+        output.log("\n  Job submitted. Use `yoso-agent job status <jobId>` to check progress.\n");
+      }
     });
   } catch (e) {
     output.fatal(`Failed to create job: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+// Buyer-initiated cancellation of a pending job (phase 0). After the seller
+// accepts, use the dispute flow instead.
+export async function cancel(jobId: string): Promise<void> {
+  if (!jobId) {
+    output.fatal("Usage: yoso-agent job cancel <jobId>");
+  }
+  const numJobId = parseJobId(jobId, "Usage: yoso-agent job cancel <jobId>");
+
+  try {
+    await client.post(`/agents/jobs/${numJobId}/cancel`);
+    output.output({ jobId: numJobId, canceled: true }, (data) => {
+      output.heading("Job Canceled");
+      output.field("Job ID", data.jobId);
+      output.log("");
+    });
+  } catch (e) {
+    const err = e as {
+      response?: { status?: number; data?: { error?: string; docsUrl?: string } };
+      message?: string;
+    };
+    const status = err.response?.status;
+    const backendErr = err.response?.data?.error;
+    const docsUrl = err.response?.data?.docsUrl;
+    if (status === 404) {
+      output.fatal("Job not found, or you are not the buyer on this job.");
+    } else if (status === 403) {
+      output.fatal("Only the buyer can cancel this job.");
+    } else if (status === 409) {
+      const hint = docsUrl ? `\n  See ${docsUrl}` : "";
+      output.fatal(`${backendErr ?? "Cannot cancel this job."}${hint}`);
+    } else {
+      output.fatal(`Failed to cancel job: ${backendErr ?? err.message ?? String(e)}`);
+    }
   }
 }
 
@@ -95,20 +144,20 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
       if (job.escrowVerifiedAt) {
         output.log("  Escrow already verified. Skipping on-chain steps.");
       } else {
-        // Verify key matches active agent
         const activeAgent = getActiveAgent();
         if (!activeAgent) {
           output.fatal("No active agent. Run `yoso-agent setup` first.");
         }
 
         const wallet = await loadSigningWallet(activeAgent.walletAddress);
-        const contractClient = new ContractClient(wallet.privateKey);
+        const contractClient = new ContractClient(wallet.privateKey, undefined, {
+          warn: (msg: string) => output.warn(msg),
+        });
 
         let onChainJobId = job.onChainJobId;
         let createJobTxHash = "";
 
         if (!onChainJobId) {
-          // Check USDC balance
           const balance = await contractClient.getUSDCBalance();
           if (balance < budget) {
             output.fatal(
@@ -116,7 +165,6 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
             );
           }
 
-          // Approve USDC to YOSORouter
           output.log("  Approving USDC...");
           const approveResult = await contractClient.approveUSDC(budget);
           if (!approveResult.success) {
@@ -126,7 +174,6 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
             output.log(`  Approved: ${approveResult.data}`);
           }
 
-          // Create on-chain job
           output.log("  Creating on-chain job...");
           const createResult = await contractClient.createJob({
             provider: job.providerAddress,
@@ -147,7 +194,6 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
           output.log(`  Resuming - on-chain job ${onChainJobId} already exists.`);
         }
 
-        // Create on-chain memo proposing TRANSACTION phase
         output.log("  Creating escrow memo on-chain...");
         const memoResult = await contractClient.createMemo({
           jobId: onChainJobId,
@@ -214,7 +260,9 @@ export async function evaluate(jobId: string, approve: boolean, reason?: string)
       if (!activeAgent) output.fatal("No active agent.");
 
       const wallet = await loadSigningWallet(activeAgent.walletAddress);
-      const contractClient = new ContractClient(wallet.privateKey);
+      const contractClient = new ContractClient(wallet.privateKey, undefined, {
+        warn: (msg: string) => output.warn(msg),
+      });
       const nextPhase = approve ? JobPhase.COMPLETED : JobPhase.REJECTED;
 
       output.log(`  Creating ${approve ? "completion" : "rejection"} memo on-chain...`);
@@ -232,7 +280,6 @@ export async function evaluate(jobId: string, approve: boolean, reason?: string)
       output.log(`  Memo: ${onChainMemoId} (tx: ${memoResult.data.txHash})`);
     }
 
-    // Call backend evaluate endpoint
     output.log("  Submitting evaluation...");
     await client.post(`/agents/jobs/${numJobId}/evaluate`, {
       approve,
@@ -278,7 +325,6 @@ export async function status(jobId: string): Promise<void> {
         output.heading(`Job ${jobId} messages`);
         errors.forEach((error: string, i: number) => output.field(`Error ${i + 1}`, error));
       });
-      // return;
     }
 
     const memoHistory = (data.memos || []).map(
@@ -293,6 +339,7 @@ export async function status(jobId: string): Promise<void> {
     const result = {
       jobId: data.id,
       phase: data.phase,
+      phaseLabel: phaseLabel(data.phase),
       providerName: data.providerName ?? null,
       providerWalletAddress: data.providerAddress ?? null,
       expiry: data.expiry ?? null,
@@ -304,7 +351,7 @@ export async function status(jobId: string): Promise<void> {
     };
     output.output(result, (r) => {
       output.heading(`Job ${r.jobId} details`);
-      output.field("Phase", r.phase);
+      output.field("Phase", `${r.phase} — ${r.phaseLabel}`);
       output.field("Client", r.clientName || "-");
       output.field("Client Wallet", r.clientWalletAddress || "-");
       output.field("Provider", r.providerName || "-");
@@ -365,7 +412,9 @@ export async function active(options: JobListOptions = {}): Promise<void> {
       }
       for (const j of list) {
         output.field("Job ID", j.id);
-        if (j.phase) output.field("Phase", String(j.phase));
+        if (j.phase != null && typeof j.phase === "number") {
+          output.field("Phase", `${j.phase} — ${phaseLabel(j.phase)}`);
+        }
         if (j.name) output.field("Name", String(j.name));
         if (j.price != null) output.field("Price", formatPrice(j.price, j.priceType));
         if (j.clientAddress) output.field("Client", String(j.clientAddress));

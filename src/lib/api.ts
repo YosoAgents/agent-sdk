@@ -81,6 +81,23 @@ export async function deleteJobOffering(offeringName: string): Promise<{ success
   }
 }
 
+export async function updateJobOffering(
+  offeringName: string,
+  offering: JobOfferingData
+): Promise<{ success: boolean; status?: number; error?: string; data?: AgentData }> {
+  try {
+    const { data } = await client.patch(
+      `/agents/job-offerings/${encodeURIComponent(offeringName)}`,
+      { data: offering }
+    );
+    return { success: true, data };
+  } catch (error: unknown) {
+    const status = (error as { response?: { status?: number } })?.response?.status;
+    const msg = error instanceof Error ? error.message : String(error);
+    return { success: false, status, error: msg };
+  }
+}
+
 export async function getPaymentUrl(): Promise<{
   success: boolean;
   url?: string;
@@ -127,4 +144,20 @@ export async function reportEscrow(
   memoId: string
 ): Promise<void> {
   await client.post(`/agents/jobs/${jobId}/escrow`, { txHash, onChainJobId, memoId });
+}
+
+export interface ActiveJobSummary {
+  id: number;
+  phase: number;
+  clientAddress: string;
+  providerAddress: string;
+  name: string;
+  budget: string;
+}
+
+export async function listActiveJobs(pageSize = 100): Promise<ActiveJobSummary[]> {
+  const { data } = await client.get<{ data: ActiveJobSummary[] }>(
+    `/agents/jobs/active?pageSize=${pageSize}`
+  );
+  return data.data;
 }

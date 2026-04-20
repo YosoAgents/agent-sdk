@@ -4,6 +4,7 @@ import * as output from "../lib/output.js";
 import {
   createJobOffering,
   deleteJobOffering,
+  updateJobOffering,
   type JobOfferingData,
   type PriceV2,
   type Resource,
@@ -16,13 +17,24 @@ import { nudgeIfNoDescription } from "../lib/profile-nudge.js";
 
 const OFFERINGS_BASE = path.resolve(ROOT, "src", "seller", "offerings");
 
+// Offerings are stored under the agent's wallet address (stable, on-chain,
+// unchangeable). If the scaffold still lives under the legacy name-based dir,
+// prefer that path so `serve start` and `sell update` keep working. The
+// migrate command moves it forward.
 function getOfferingsRoot(): string {
   const agent = getActiveAgent();
   if (!agent) {
     console.error("Error: No active agent. Run `yoso-agent setup` first.");
     process.exit(1);
   }
-  return path.resolve(OFFERINGS_BASE, sanitizeAgentName(agent.name));
+  const walletDir = agent.walletAddress.toLowerCase();
+  const legacyDir = sanitizeAgentName(agent.name);
+  const walletPath = path.resolve(OFFERINGS_BASE, walletDir);
+  const legacyPath = path.resolve(OFFERINGS_BASE, legacyDir);
+
+  if (fs.existsSync(walletPath)) return walletPath;
+  if (legacyDir && fs.existsSync(legacyPath)) return legacyPath;
+  return walletPath;
 }
 
 interface OfferingJson {
@@ -338,7 +350,7 @@ export function requestPayment(request: Record<string, unknown>): string {
   fs.writeFileSync(path.join(dir, "handlers.ts"), handlersTemplate);
 
   const agent = getActiveAgent();
-  const agentDir = agent ? sanitizeAgentName(agent.name) : "unknown";
+  const agentDir = agent ? agent.walletAddress.toLowerCase() : "unknown";
   output.output({ created: dir }, () => {
     output.heading("Offering Scaffolded");
     output.log(`  Created: src/seller/offerings/${agentDir}/${offeringName}/`);
@@ -373,7 +385,6 @@ export async function create(offeringName: string): Promise<void> {
   const allErrors: string[] = [];
   const allWarnings: string[] = [];
 
-  // Validate offering.json
   output.log("  Checking offering.json...");
   const jsonPath = path.join(dir, "offering.json");
   const jsonResult = validateOfferingJson(jsonPath);
@@ -395,7 +406,6 @@ export async function create(offeringName: string): Promise<void> {
     output.log("    Invalid");
   }
 
-  // Validate handlers.ts
   output.log("\n  Checking handlers.ts...");
   const handlersPath = path.join(dir, "handlers.ts");
   const handlersResult = validateHandlers(handlersPath, parsedOffering?.requiredFunds);
@@ -423,7 +433,6 @@ export async function create(offeringName: string): Promise<void> {
 
   output.log("\n  Validation passed!\n");
 
-  // Register with marketplace
   const json: OfferingJson = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
   const payload = buildOfferingPayload(json);
 
@@ -436,7 +445,6 @@ export async function create(offeringName: string): Promise<void> {
     output.fatal("  Failed to register offering on marketplace.");
   }
 
-  // Start seller if not running
   output.log("  Tip: Run `yoso-agent serve start` to begin accepting jobs.\n");
 
   // Best-effort nudge if the agent still has no marketplace description.
@@ -457,6 +465,60 @@ export async function del(offeringName: string): Promise<void> {
   } else {
     output.fatal("  Failed to delist offering from marketplace.");
   }
+}
+
+// Update an existing offering on the marketplace. Preserves historical job
+// counts and completion metrics that `delete + create` would destroy.
+export async function update(offeringName: string): Promise<void> {
+  if (!offeringName) {
+    output.fatal("Usage: yoso-agent sell update <offering_name>");
+  }
+
+  const dir = resolveOfferingDir(offeringName);
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+    output.fatal(
+      `Offering directory not found: ${dir}\n  Create it with: yoso-agent sell init ${offeringName}`
+    );
+  }
+
+  output.log(`\nValidating offering: "${offeringName}"\n`);
+
+  const jsonPath = path.join(dir, "offering.json");
+  const jsonResult = validateOfferingJson(jsonPath);
+  if (!jsonResult.valid) {
+    output.log("\n  Errors:");
+    jsonResult.errors.forEach((e) => output.log(`    - ${e}`));
+    output.fatal("\n  Validation failed. Fix the errors above.");
+  }
+  if (jsonResult.warnings.length > 0) {
+    output.log("\n  Warnings:");
+    jsonResult.warnings.forEach((w) => output.log(`    - ${w}`));
+  }
+
+  const json: OfferingJson = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
+  const payload = buildOfferingPayload(json);
+
+  output.log("\n  Updating offering on marketplace...");
+  const result = await updateJobOffering(offeringName, payload);
+
+  if (result.success) {
+    output.output(result.data, () => {
+      output.heading("Offering Updated");
+      output.field("Name", offeringName);
+      output.log("\n  Historical job counts and completion metrics have been preserved.\n");
+    });
+    return;
+  }
+
+  if (result.status === 404) {
+    output.fatal(
+      `  Offering "${offeringName}" not found on the marketplace.\n  Create it with: yoso-agent sell create ${offeringName}`
+    );
+  }
+
+  output.fatal(
+    `  Failed to update offering on marketplace${result.error ? `: ${result.error}` : "."}`
+  );
 }
 
 interface LocalOffering {
@@ -531,7 +593,6 @@ export async function list(): Promise<void> {
     remoteOnly: false as const,
   }));
 
-  // Remote-only offerings: listed on marketplace but no local directory
   const remoteOnlyData = remoteOfferings
     .filter((o) => !localNames.has(o.name))
     .map((o) => ({

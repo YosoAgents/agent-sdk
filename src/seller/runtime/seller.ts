@@ -1,9 +1,12 @@
 #!/usr/bin/env npx tsx
 
+import * as fs from "fs";
+import * as path from "path";
 import { connectSellerSocket } from "./sellerSocket.js";
 import { acceptOrRejectJob, requestPayment, deliverJob } from "./sellerApi.js";
 import { getJobDetails } from "../../lib/api.js";
 import { loadOffering, listOfferings } from "./offerings.js";
+import { rejectStaleJobs } from "./rejectStaleJobs.js";
 import { JobPhase, type JobEventData, type SignMemoRequestData } from "./types.js";
 import type { ExecuteJobResult } from "./offeringTypes.js";
 import { getMyAgentInfo } from "../../lib/wallet.js";
@@ -13,11 +16,13 @@ import {
   removePidFromConfig,
   sanitizeAgentName,
   requireApiKey,
+  ROOT,
 } from "../../lib/config.js";
 import { ContractClient } from "../../lib/contract-client.js";
 import client from "../../lib/client.js";
 import type { JsonObject } from "../../lib/types.js";
 import { loadSigningWallet } from "../../lib/keystore.js";
+import { installTimestampedConsole } from "./timestampedConsole.js";
 
 function setupCleanupHandlers(): void {
   const cleanup = () => {
@@ -280,7 +285,32 @@ async function handleSignMemoRequest(data: SignMemoRequestData): Promise<void> {
   }
 }
 
+// Resolve the offerings directory for this agent. Prefers the stable
+// wallet-based path; falls back to the legacy `sanitizeAgentName(name)` path
+// with a migration warning so existing scaffolds keep working. Name is
+// mutable (users can run `profile update name`), wallet is not — so
+// renames no longer desync the runtime from its files.
+function resolveAgentDir(agentName: string, walletAddress: string): string {
+  const offeringsRoot = path.resolve(ROOT, "src", "seller", "offerings");
+  const walletDir = walletAddress.toLowerCase();
+  const legacyDir = sanitizeAgentName(agentName);
+
+  const walletPath = path.resolve(offeringsRoot, walletDir);
+  const legacyPath = path.resolve(offeringsRoot, legacyDir);
+
+  if (fs.existsSync(walletPath)) return walletDir;
+  if (legacyDir && fs.existsSync(legacyPath)) {
+    console.warn(
+      `[seller] Using legacy offerings dir "${legacyDir}". Run \`yoso-agent migrate offerings\` to move them to "${walletDir}".`
+    );
+    return legacyDir;
+  }
+  return walletDir;
+}
+
 async function main() {
+  installTimestampedConsole();
+
   checkForExistingProcess();
 
   writePidToConfig(process.pid);
@@ -288,10 +318,12 @@ async function main() {
   setupCleanupHandlers();
 
   let walletAddress: string;
+  let backendOfferingCount = 0;
   try {
     const agentData = await getMyAgentInfo();
     walletAddress = agentData.walletAddress;
-    agentDirName = sanitizeAgentName(agentData.name);
+    agentDirName = resolveAgentDir(agentData.name, walletAddress);
+    backendOfferingCount = agentData.jobs?.length ?? 0;
     console.log(`[seller] Agent: ${agentData.name} (dir: ${agentDirName})`);
   } catch (err) {
     console.error("[seller] Failed to resolve agent info:", err);
@@ -303,6 +335,16 @@ async function main() {
     `[seller] Available offerings: ${offerings.length > 0 ? offerings.join(", ") : "(none)"}`
   );
 
+  if (backendOfferingCount > 0 && offerings.length === 0) {
+    const walletDir = walletAddress.toLowerCase();
+    console.warn(
+      `\n[seller] WARNING: Backend has ${backendOfferingCount} offering(s) registered, but none were found locally.\n` +
+        `  Expected path: src/seller/offerings/${walletDir}/<offeringName>/\n` +
+        `  If you migrated from an older layout, run: yoso-agent migrate offerings\n` +
+        `  If this is a fresh workstation, run \`yoso-agent sell create <name>\` to scaffold handlers.\n`
+    );
+  }
+
   try {
     const wallet = await loadSigningWallet(walletAddress);
     contractClient = new ContractClient(wallet.privateKey);
@@ -313,7 +355,7 @@ async function main() {
   }
 
   const apiKey = requireApiKey();
-  connectSellerSocket({
+  const { ready } = connectSellerSocket({
     marketplaceUrl: MARKETPLACE_URL,
     walletAddress,
     apiKey,
@@ -335,6 +377,17 @@ async function main() {
       },
     },
   });
+
+  try {
+    await ready;
+    try {
+      await rejectStaleJobs(walletAddress);
+    } catch (err) {
+      console.error("[seller] Stale-job cleanup failed:", err);
+    }
+  } catch (err) {
+    console.error("[seller] Socket never became ready; skipping stale-job cleanup.", err);
+  }
 
   console.log("[seller] Seller runtime is running. Waiting for jobs...\n");
 }
