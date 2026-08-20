@@ -16,12 +16,12 @@ function err(error: string): ToolResult {
 }
 
 const NOT_CONFIGURED =
-  "Hyperliquid not configured. Set HYPERLIQUID_PRIVATE_KEY and HYPERLIQUID_WALLET_ADDRESS in .env";
+  "Hyperliquid self-custodied trading is not configured. Set HYPERLIQUID_PRIVATE_KEY and HYPERLIQUID_WALLET_ADDRESS in .env only for your own approved API wallet.";
 
 export function registerTradingTools(server: McpServer, client: HyperliquidClient | null): void {
   server.tool(
     "hl_place_order",
-    "Place an order on Hyperliquid (limit, market, ALO, or bracket with TP/SL)",
+    "Place an order on Hyperliquid using the local self-custodied signer (not marketplace buyer execution)",
     {
       coin: z.string().min(1).max(20).describe("Ticker (e.g. BTC, ETH, xyz:NVDA)"),
       side: z.enum(["buy", "sell"]).describe("Order side"),
@@ -92,7 +92,7 @@ export function registerTradingTools(server: McpServer, client: HyperliquidClien
 
   server.tool(
     "hl_cancel_order",
-    "Cancel an open order on Hyperliquid",
+    "Cancel an open order on Hyperliquid using the local self-custodied signer",
     {
       coin: z.string().min(1).max(20).describe("Ticker"),
       order_id: z.number().int().positive().describe("Order ID"),
@@ -110,7 +110,7 @@ export function registerTradingTools(server: McpServer, client: HyperliquidClien
 
   server.tool(
     "hl_modify_order",
-    "Modify an existing order on Hyperliquid",
+    "Modify an existing order on Hyperliquid using the local self-custodied signer",
     {
       order_id: z.number().int().positive().describe("Order ID"),
       coin: z.string().min(1).max(20).describe("Ticker"),
@@ -142,7 +142,7 @@ export function registerTradingTools(server: McpServer, client: HyperliquidClien
 
   server.tool(
     "hl_close_position",
-    "Market-close a position on Hyperliquid",
+    "Market-close a position on Hyperliquid using the local self-custodied signer",
     { coin: z.string().min(1).max(20).describe("Ticker to close") },
     async (params) => {
       if (!client) return err(NOT_CONFIGURED);

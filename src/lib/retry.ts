@@ -15,7 +15,8 @@ export function isInvalidBlockHeight(err: unknown): { blockNum: string } | null 
 
 export async function retryOnInvalidBlockHeight<T>(
   fn: () => Promise<T>,
-  logger: RetryLogger = SILENT_LOGGER
+  logger: RetryLogger = SILENT_LOGGER,
+  beforeRetry?: (error: unknown) => void | Promise<void>
 ): Promise<T> {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -26,6 +27,7 @@ export async function retryOnInvalidBlockHeight<T>(
       logger.warn(
         `RPC hiccup on block ${transient.blockNum}, retrying (${attempt + 1}/${MAX_RETRIES})...`
       );
+      await beforeRetry?.(err);
       await new Promise((r) => setTimeout(r, BASE_BACKOFF_MS * 2 ** attempt));
     }
   }

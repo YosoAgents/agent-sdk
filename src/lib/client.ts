@@ -60,7 +60,13 @@ client.interceptors.response.use(
       // config so echoing it back adds noise.
       const cfg = error.config ?? {};
       const url = typeof cfg.url === "string" ? cfg.url : undefined;
-      throw new Error(formatApiErrorMessage(status, code, body, url));
+      const formatted = new Error(formatApiErrorMessage(status, code, body, url)) as Error & {
+        status?: number;
+        response?: { status?: number; data?: unknown };
+      };
+      formatted.status = status;
+      formatted.response = { status, data: error.response.data };
+      throw formatted;
     }
     throw error;
   }

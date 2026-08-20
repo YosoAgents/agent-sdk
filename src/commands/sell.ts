@@ -5,6 +5,7 @@ import {
   createJobOffering,
   deleteJobOffering,
   updateJobOffering,
+  type ExecutionMode,
   type JobOfferingData,
   type PriceV2,
   type Resource,
@@ -45,6 +46,7 @@ interface OfferingJson {
   priceV2?: PriceV2;
   slaMinutes?: number;
   requiredFunds: boolean;
+  executionMode?: ExecutionMode;
   requirement?: JsonObject;
   deliverable?: string;
   resources?: Resource[];
@@ -155,6 +157,16 @@ function validateOfferingJson(filePath: string): ValidationResult {
   } else if (typeof offering.requiredFunds !== "boolean") {
     result.valid = false;
     result.errors.push('offering.json: "requiredFunds" must be true or false');
+  }
+
+  if (
+    offering.executionMode !== undefined &&
+    offering.executionMode !== "none" &&
+    offering.executionMode !== "confirm" &&
+    offering.executionMode !== "autonomous"
+  ) {
+    result.valid = false;
+    result.errors.push('offering.json: "executionMode" must be "none", "confirm", or "autonomous"');
   }
 
   if (offering.subscriptionTiers !== undefined) {
@@ -302,6 +314,7 @@ function buildOfferingPayload(json: OfferingJson): JobOfferingData {
     priceV2: json.priceV2 ?? { type: json.jobFeeType, value: json.jobFee },
     slaMinutes: json.slaMinutes ?? 5,
     requiredFunds: json.requiredFunds,
+    executionMode: json.executionMode ?? "none",
     requirement: json.requirement ?? {},
     deliverable: json.deliverable ?? "string",
     ...(json.resources?.length && { resources: json.resources }),
@@ -327,6 +340,7 @@ export async function init(offeringName: string): Promise<void> {
     jobFee: null,
     jobFeeType: null,
     requiredFunds: false,
+    executionMode: "none",
     requirement: {},
   };
 

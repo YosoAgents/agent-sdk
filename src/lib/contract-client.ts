@@ -13,19 +13,38 @@ export type Result<T> = { success: true; data: T } | { success: false; error: st
 
 export class ContractClient {
   private wallet: ethers.Wallet;
+  private nonceManager: ethers.NonceManager;
   private provider: ethers.JsonRpcProvider;
   private router: ethers.Contract;
-  private memoManager: ethers.Contract;
   private usdc: ethers.Contract;
+  private writeUsdc: ethers.Contract;
   private chainVerified = false;
   private logger: RetryLogger;
+  private submissionTail: Promise<void> = Promise.resolve();
+  private canResetNonce = false;
 
   constructor(privateKey: string, rpcUrl?: string, logger: RetryLogger = SILENT_LOGGER) {
     this.provider = new ethers.JsonRpcProvider(rpcUrl || HYPEREVM_RPC_URL);
     this.wallet = new ethers.Wallet(privateKey, this.provider);
-    this.router = new ethers.Contract(CONTRACTS.YOSO_ROUTER, YOSO_ROUTER_ABI, this.wallet);
-    this.memoManager = new ethers.Contract(CONTRACTS.MEMO_MANAGER, MEMO_MANAGER_ABI, this.wallet);
+    // NonceManager increments before delegating to its signer. This wrapper marks
+    // the exact boundary where an error could follow a broadcast attempt.
+    const nonceTrackingWallet = new Proxy(this.wallet, {
+      get: (wallet, property) => {
+        if (property === "sendTransaction") {
+          return async (transaction: ethers.TransactionRequest) => {
+            this.canResetNonce = false;
+            // After this call starts, a send failure is ambiguous; never reset the nonce.
+            return wallet.sendTransaction(transaction);
+          };
+        }
+        const value = Reflect.get(wallet, property, wallet);
+        return typeof value === "function" ? value.bind(wallet) : value;
+      },
+    }) as ethers.Signer;
+    this.nonceManager = new ethers.NonceManager(nonceTrackingWallet);
+    this.router = new ethers.Contract(CONTRACTS.YOSO_ROUTER, YOSO_ROUTER_ABI, this.nonceManager);
     this.usdc = new ethers.Contract(CONTRACTS.USDC, ERC20_ABI, this.wallet);
+    this.writeUsdc = new ethers.Contract(CONTRACTS.USDC, ERC20_ABI, this.nonceManager);
     this.logger = logger;
   }
 
@@ -38,6 +57,26 @@ export class ContractClient {
       );
     }
     this.chainVerified = true;
+  }
+
+  // Keep only transaction creation/submission exclusive; receipt waits remain concurrent.
+  private async submitWrite<T>(submit: () => Promise<T>): Promise<T> {
+    const previous = this.submissionTail;
+    let release!: () => void;
+    this.submissionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+
+    try {
+      this.canResetNonce = true;
+      return await retryOnInvalidBlockHeight(submit, this.logger, async () => {
+        if (this.canResetNonce) this.nonceManager.reset();
+      });
+    } finally {
+      this.canResetNonce = false;
+      release();
+    }
   }
 
   get address(): string {
@@ -78,9 +117,8 @@ export class ContractClient {
 
       // Retry send alone; once a tx exists, retry wait alone. Prevents duplicate submissions
       // if wait fails — tx.wait() on the same response is idempotent.
-      const tx = await retryOnInvalidBlockHeight<ethers.ContractTransactionResponse>(
-        () => this.usdc.approve(CONTRACTS.YOSO_ROUTER, amount),
-        this.logger
+      const tx = await this.submitWrite(() =>
+        this.writeUsdc.approve(CONTRACTS.YOSO_ROUTER, amount)
       );
       const receipt = await retryOnInvalidBlockHeight<ethers.ContractTransactionReceipt | null>(
         () => tx.wait(),
@@ -109,17 +147,15 @@ export class ContractClient {
       await this.verifyChain();
       const evaluator = params.evaluator || ethers.ZeroAddress;
 
-      const tx = await retryOnInvalidBlockHeight<ethers.ContractTransactionResponse>(
-        () =>
-          this.router.createJob(
-            params.provider,
-            evaluator,
-            params.expiredAt,
-            CONTRACTS.USDC,
-            params.budget,
-            params.metadata
-          ),
-        this.logger
+      const tx = await this.submitWrite(() =>
+        this.router.createJob(
+          params.provider,
+          evaluator,
+          params.expiredAt,
+          CONTRACTS.USDC,
+          params.budget,
+          params.metadata
+        )
       );
 
       const receipt = await retryOnInvalidBlockHeight<ethers.ContractTransactionReceipt | null>(
@@ -167,16 +203,14 @@ export class ContractClient {
     try {
       await this.verifyChain();
 
-      const tx = await retryOnInvalidBlockHeight<ethers.ContractTransactionResponse>(
-        () =>
-          this.router.createMemo(
-            params.jobId,
-            params.content,
-            params.memoType,
-            params.isSecured,
-            params.nextPhase
-          ),
-        this.logger
+      const tx = await this.submitWrite(() =>
+        this.router.createMemo(
+          params.jobId,
+          params.content,
+          params.memoType,
+          params.isSecured,
+          params.nextPhase
+        )
       );
 
       const receipt = await retryOnInvalidBlockHeight<ethers.ContractTransactionReceipt | null>(
@@ -219,10 +253,7 @@ export class ContractClient {
     try {
       await this.verifyChain();
 
-      const tx = await retryOnInvalidBlockHeight<ethers.ContractTransactionResponse>(
-        () => this.router.signMemo(memoId, isApproved, reason),
-        this.logger
-      );
+      const tx = await this.submitWrite(() => this.router.signMemo(memoId, isApproved, reason));
       const receipt = await retryOnInvalidBlockHeight<ethers.ContractTransactionReceipt | null>(
         () => tx.wait(),
         this.logger

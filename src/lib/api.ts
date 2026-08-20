@@ -6,12 +6,15 @@ export interface PriceV2 {
   value: number;
 }
 
+export type ExecutionMode = "none" | "confirm" | "autonomous";
+
 export interface JobOfferingData {
   name: string;
   description: string;
   priceV2: PriceV2;
   slaMinutes: number;
   requiredFunds: boolean;
+  executionMode?: ExecutionMode;
   requirement: JsonObject;
   deliverable: string;
   resources?: Resource[];
@@ -55,6 +58,50 @@ export interface NegotiationPhaseParams {
   content?: string;
 }
 
+export interface ExecutionOrderIntent {
+  jobId: number;
+  clientRequestId?: string;
+  order: {
+    asset: string;
+    side: "buy" | "sell";
+    size: string;
+    limitPrice: string;
+    reduceOnly?: boolean;
+    timeInForce?: "Gtc" | "Ioc" | "Alo";
+    clientOrderId?: string;
+  };
+}
+
+type ApiErrorLike = {
+  status?: unknown;
+  response?: {
+    status?: unknown;
+  };
+};
+
+function apiErrorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const err = error as ApiErrorLike;
+  if (typeof err.response?.status === "number") return err.response.status;
+  return typeof err.status === "number" ? err.status : undefined;
+}
+
+interface ExecutionOrderAuthorizationBase {
+  status: "blocked" | string;
+  executionActionId: string;
+  requestHash: string;
+}
+
+export type ExecutionOrderAuthorization =
+  | (ExecutionOrderAuthorizationBase & {
+      authorized: true;
+      reason?: string;
+    })
+  | (ExecutionOrderAuthorizationBase & {
+      authorized: false;
+      reason: string;
+    });
+
 export async function createJobOffering(
   offering: JobOfferingData
 ): Promise<{ success: boolean; data?: AgentData }> {
@@ -92,7 +139,7 @@ export async function updateJobOffering(
     );
     return { success: true, data };
   } catch (error: unknown) {
-    const status = (error as { response?: { status?: number } })?.response?.status;
+    const status = apiErrorStatus(error);
     const msg = error instanceof Error ? error.message : String(error);
     return { success: false, status, error: msg };
   }
@@ -120,6 +167,25 @@ export async function processNegotiationPhase(
   return await client.post(`/agents/providers/jobs/${jobId}/negotiation`, params);
 }
 
+export async function authorizeExecutionOrderIntent(intent: ExecutionOrderIntent): Promise<{
+  success: boolean;
+  data?: ExecutionOrderAuthorization;
+  status?: number;
+  error?: string;
+}> {
+  try {
+    const { data } = await client.post<{ data: ExecutionOrderAuthorization }>(
+      "/agents/execution/orders/authorize",
+      intent
+    );
+    return { success: true, data: data.data };
+  } catch (error: unknown) {
+    const status = apiErrorStatus(error);
+    const msg = error instanceof Error ? error.message : String(error);
+    return { success: false, status, error: msg };
+  }
+}
+
 export interface JobDetails {
   id: number;
   phase: number;
@@ -129,7 +195,13 @@ export interface JobDetails {
   expiry: number | null;
   paymentToken: string | null;
   onChainJobId: string | null;
+  escrowTxHash: string | null;
   escrowVerifiedAt: string | null;
+  memos?: Array<{
+    nextPhase: number;
+    status: "pending" | "approved" | "rejected";
+    onChainMemoId: string | null;
+  }>;
 }
 
 export async function getJobDetails(jobId: number): Promise<JobDetails> {

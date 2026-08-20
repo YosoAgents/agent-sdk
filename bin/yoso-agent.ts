@@ -94,6 +94,7 @@ function buildHelp(): string {
     cmd("wallet address", "Get agent wallet address"),
     cmd("wallet balance", "Get all token balances"),
     cmd("wallet topup", "Get funding instructions"),
+    cmd("link-web <payload>", "Sign yoso.sh wallet-link challenge"),
     "",
     section("Profile"),
     cmd("profile show", "Show full agent profile"),
@@ -206,6 +207,19 @@ function buildCommandHelp(command: string): string | undefined {
         "",
         cmd("address", "Get your wallet address (HyperEVM)"),
         cmd("balance", "Get all token balances in your wallet"),
+        "",
+      ].join("\n"),
+
+    "link-web": () =>
+      [
+        "",
+        `  ${bold("yoso-agent link-web <payload>")} ${dim("- Link an SDK wallet to yoso.sh")}`,
+        "",
+        `  ${dim("Signs the wallet-link challenge copied from Account wallets on yoso.sh.")}`,
+        `  ${dim("Paste the printed signature back into the web modal to finish linking.")}`,
+        "",
+        flag("--yes, -y", "Skip confirmation prompt"),
+        flag("--json", "Print the signature as JSON"),
         "",
       ].join("\n"),
 
@@ -497,6 +511,15 @@ async function main(): Promise<void> {
       sparseCutoff: sparCutoff !== undefined ? parseFloat(sparCutoff) : undefined,
       topK: topK !== undefined ? parseInt(topK, 10) : undefined,
     });
+  }
+
+  if (command === "link-web") {
+    const linkArgs = [subcommand, ...rest].filter(Boolean);
+    const { linkWeb } = await import("../src/commands/link-web.js");
+    return linkWeb(
+      linkArgs.find((arg) => !arg.startsWith("-")),
+      { yes: hasFlag(linkArgs, "--yes", "-y") }
+    );
   }
 
   if (command === "serve" && subcommand === "deploy") {

@@ -104,6 +104,22 @@ function parseJobId(jobId: string, usage: string): number {
   return parsed;
 }
 
+function normalizeOnChainJobId(onChainJobId: unknown): string | null {
+  if (onChainJobId === null) return null;
+  if (typeof onChainJobId !== "string") {
+    output.fatal(
+      "Cannot resume escrow: the existing on-chain job ID must be a non-empty numeric string."
+    );
+  }
+  const normalized = onChainJobId.trim();
+  if (!/^\d+$/.test(normalized)) {
+    output.fatal(
+      "Cannot resume escrow: the existing on-chain job ID must be a non-empty numeric string."
+    );
+  }
+  return normalized;
+}
+
 export async function pay(jobId: string, accept: boolean, content?: string): Promise<void> {
   if (!jobId) {
     output.fatal("Usage: yoso-agent job pay <jobId> --accept <true|false> [--content '<text>']");
@@ -140,24 +156,55 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
         );
       }
 
+      const onChainJobId = normalizeOnChainJobId(job.onChainJobId);
+
       // Idempotency: already fully escrowed
       if (job.escrowVerifiedAt) {
         output.log("  Escrow already verified. Skipping on-chain steps.");
       } else {
-        const activeAgent = getActiveAgent();
-        if (!activeAgent) {
-          output.fatal("No active agent. Run `yoso-agent setup` first.");
-        }
+        if (onChainJobId !== null) {
+          const escrowTxHash = job.escrowTxHash?.trim();
+          if (!escrowTxHash) {
+            output.fatal(
+              "Cannot resume escrow: the existing on-chain job is missing its escrow transaction hash."
+            );
+          }
 
-        const wallet = await loadSigningWallet(activeAgent.walletAddress);
-        const contractClient = new ContractClient(wallet.privateKey, undefined, {
-          warn: (msg: string) => output.warn(msg),
-        });
+          if (!job.memos) {
+            output.fatal(
+              "Cannot resume escrow: the existing on-chain job is missing memo recovery data."
+            );
+          }
 
-        let onChainJobId = job.onChainJobId;
-        let createJobTxHash = "";
+          const pendingEscrowMemos = job.memos.filter(
+            (memo) =>
+              memo.nextPhase === JobPhase.TRANSACTION &&
+              memo.status === "pending" &&
+              !!memo.onChainMemoId?.trim()
+          );
+          if (pendingEscrowMemos.length !== 1) {
+            output.fatal(
+              `Cannot resume escrow: expected exactly one pending TRANSACTION memo with an on-chain memo ID, found ${pendingEscrowMemos.length}.`
+            );
+          }
 
-        if (!onChainJobId) {
+          const memoId = pendingEscrowMemos[0].onChainMemoId!.trim();
+          output.log(`  Resuming - on-chain job ${onChainJobId} already exists.`);
+          output.log(`  Reusing escrow memo ${memoId}.`);
+          output.log("  Reporting to backend...");
+          await reportEscrow(numJobId, escrowTxHash, onChainJobId, memoId);
+          output.log("  Waiting for provider to sign escrow on-chain...");
+        } else {
+          const activeAgent = getActiveAgent();
+          if (!activeAgent) {
+            output.fatal("No active agent. Run `yoso-agent setup` first.");
+          }
+
+          const wallet = await loadSigningWallet(activeAgent.walletAddress);
+          const contractClient = new ContractClient(wallet.privateKey, undefined, {
+            warn: (msg: string) => output.warn(msg),
+          });
+
           const balance = await contractClient.getUSDCBalance();
           if (balance < budget) {
             output.fatal(
@@ -187,32 +234,27 @@ export async function pay(jobId: string, accept: boolean, content?: string): Pro
             output.fatal(`On-chain job creation failed: ${createResult.error}`);
           }
 
-          onChainJobId = createResult.data.onChainJobId;
-          createJobTxHash = createResult.data.txHash;
-          output.log(`  On-chain job: ${onChainJobId} (tx: ${createJobTxHash})`);
-        } else {
-          output.log(`  Resuming - on-chain job ${onChainJobId} already exists.`);
+          const onChainJobId = createResult.data.onChainJobId;
+          const escrowTxHash = createResult.data.txHash;
+          output.log(`  On-chain job: ${onChainJobId} (tx: ${escrowTxHash})`);
+
+          output.log("  Creating escrow memo on-chain...");
+          const memoResult = await contractClient.createMemo({
+            jobId: onChainJobId,
+            content: "Escrow deposit",
+            memoType: MemoType.MESSAGE,
+            isSecured: false,
+            nextPhase: JobPhase.TRANSACTION,
+          });
+          if (!memoResult.success) {
+            output.fatal(`On-chain memo creation failed: ${memoResult.error}`);
+          }
+
+          output.log(`  Memo: ${memoResult.data.memoId} (tx: ${memoResult.data.txHash})`);
+          output.log("  Reporting to backend...");
+          await reportEscrow(numJobId, escrowTxHash, onChainJobId, memoResult.data.memoId);
+          output.log("  Waiting for provider to sign escrow on-chain...");
         }
-
-        output.log("  Creating escrow memo on-chain...");
-        const memoResult = await contractClient.createMemo({
-          jobId: onChainJobId,
-          content: "Escrow deposit",
-          memoType: MemoType.MESSAGE,
-          isSecured: false,
-          nextPhase: JobPhase.TRANSACTION,
-        });
-        if (!memoResult.success) {
-          output.fatal(`On-chain memo creation failed: ${memoResult.error}`);
-        }
-
-        output.log(`  Memo: ${memoResult.data.memoId} (tx: ${memoResult.data.txHash})`);
-
-        // Report to backend - backend validates and notifies provider to sign
-        output.log("  Reporting to backend...");
-        await reportEscrow(numJobId, createJobTxHash, onChainJobId, memoResult.data.memoId);
-
-        output.log("  Waiting for provider to sign escrow on-chain...");
       }
     }
 

@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 export interface HyperliquidConfig {
+  // Local/self-custodied signer. Never represents marketplace buyer execution authority.
   privateKey: string;
   walletAddress: string;
   testnet: boolean;
