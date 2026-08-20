@@ -7,7 +7,12 @@ import {
   MEMO_MANAGER_ABI,
   ERC20_ABI,
 } from "./contracts.js";
-import { retryOnInvalidBlockHeight, SILENT_LOGGER, type RetryLogger } from "./retry.js";
+import {
+  isInvalidBlockHeight,
+  retryOnInvalidBlockHeight,
+  SILENT_LOGGER,
+  type RetryLogger,
+} from "./retry.js";
 
 export type Result<T> = { success: true; data: T } | { success: false; error: string };
 
@@ -18,33 +23,34 @@ export class ContractClient {
   private router: ethers.Contract;
   private usdc: ethers.Contract;
   private writeUsdc: ethers.Contract;
+  private memoManager: ethers.Contract;
   private chainVerified = false;
   private logger: RetryLogger;
   private submissionTail: Promise<void> = Promise.resolve();
   private canResetNonce = false;
 
   constructor(privateKey: string, rpcUrl?: string, logger: RetryLogger = SILENT_LOGGER) {
-    this.provider = new ethers.JsonRpcProvider(rpcUrl || HYPEREVM_RPC_URL);
-    this.wallet = new ethers.Wallet(privateKey, this.provider);
-    // NonceManager increments before delegating to its signer. This wrapper marks
-    // the exact boundary where an error could follow a broadcast attempt.
-    const nonceTrackingWallet = new Proxy(this.wallet, {
-      get: (wallet, property) => {
-        if (property === "sendTransaction") {
-          return async (transaction: ethers.TransactionRequest) => {
+    const provider = new ethers.JsonRpcProvider(rpcUrl || HYPEREVM_RPC_URL);
+    // Ethers populates and signs inside Wallet.sendTransaction before it calls
+    // provider.broadcastTransaction. Only the latter is an ambiguous submission boundary.
+    this.provider = new Proxy(provider, {
+      get: (target, property) => {
+        if (property === "broadcastTransaction") {
+          return async (signedTx: string) => {
             this.canResetNonce = false;
-            // After this call starts, a send failure is ambiguous; never reset the nonce.
-            return wallet.sendTransaction(transaction);
+            return target.broadcastTransaction(signedTx);
           };
         }
-        const value = Reflect.get(wallet, property, wallet);
-        return typeof value === "function" ? value.bind(wallet) : value;
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
       },
-    }) as ethers.Signer;
-    this.nonceManager = new ethers.NonceManager(nonceTrackingWallet);
+    }) as ethers.JsonRpcProvider;
+    this.wallet = new ethers.Wallet(privateKey, this.provider);
+    this.nonceManager = new ethers.NonceManager(this.wallet);
     this.router = new ethers.Contract(CONTRACTS.YOSO_ROUTER, YOSO_ROUTER_ABI, this.nonceManager);
     this.usdc = new ethers.Contract(CONTRACTS.USDC, ERC20_ABI, this.wallet);
     this.writeUsdc = new ethers.Contract(CONTRACTS.USDC, ERC20_ABI, this.nonceManager);
+    this.memoManager = new ethers.Contract(CONTRACTS.MEMO_MANAGER, MEMO_MANAGER_ABI, this.provider);
     this.logger = logger;
   }
 
@@ -59,8 +65,11 @@ export class ContractClient {
     this.chainVerified = true;
   }
 
-  // Keep only transaction creation/submission exclusive; receipt waits remain concurrent.
-  private async submitWrite<T>(submit: () => Promise<T>): Promise<T> {
+  // Keep recovery decisions and any retry exclusive with transaction submission.
+  private async submitWrite<T>(
+    submit: () => Promise<T>,
+    recoverStaleNonce?: () => Promise<boolean>
+  ): Promise<T> {
     const previous = this.submissionTail;
     let release!: () => void;
     this.submissionTail = new Promise<void>((resolve) => {
@@ -68,14 +77,68 @@ export class ContractClient {
     });
     await previous;
 
+    const retryBeforeBroadcast = (error: unknown) => {
+      if (!this.canResetNonce) throw error;
+      this.nonceManager.reset();
+    };
+    const resetAfterTerminalPreBroadcastError = () => {
+      if (this.canResetNonce) this.nonceManager.reset();
+    };
+
     try {
       this.canResetNonce = true;
-      return await retryOnInvalidBlockHeight(submit, this.logger, async () => {
-        if (this.canResetNonce) this.nonceManager.reset();
-      });
+      try {
+        return await retryOnInvalidBlockHeight(submit, this.logger, retryBeforeBroadcast);
+      } catch (error) {
+        resetAfterTerminalPreBroadcastError();
+        if (!recoverStaleNonce) {
+          if (!this.canResetNonce && this.isStaleNonceError(error)) this.nonceManager.reset();
+          throw error;
+        }
+        if (!this.isStaleNonceError(error)) throw error;
+        if (!(await recoverStaleNonce())) {
+          this.nonceManager.reset();
+          throw error;
+        }
+
+        this.nonceManager.reset();
+        this.canResetNonce = true;
+        try {
+          return await retryOnInvalidBlockHeight(submit, this.logger, retryBeforeBroadcast);
+        } catch (recoveryError) {
+          resetAfterTerminalPreBroadcastError();
+          if (this.isStaleNonceError(recoveryError)) this.nonceManager.reset();
+          throw recoveryError;
+        }
+      }
     } finally {
       this.canResetNonce = false;
       release();
+    }
+  }
+
+  private isStaleNonceError(err: unknown): boolean {
+    return ethers.isError(err, "NONCE_EXPIRED");
+  }
+
+  private async isMemoUnsigned(memoId: string): Promise<boolean> {
+    try {
+      const expectedMemoId = BigInt(memoId);
+      if (expectedMemoId <= 0n) return false;
+
+      const memo = (await retryOnInvalidBlockHeight(
+        () => this.memoManager.getMemo(memoId),
+        this.logger
+      )) as { id?: unknown; isApproved?: unknown; approvedBy?: unknown };
+      return (
+        typeof memo.id === "bigint" &&
+        memo.id === expectedMemoId &&
+        memo.isApproved === false &&
+        typeof memo.approvedBy === "string" &&
+        memo.approvedBy.toLowerCase() === ethers.ZeroAddress
+      );
+    } catch {
+      return false;
     }
   }
 
@@ -253,7 +316,10 @@ export class ContractClient {
     try {
       await this.verifyChain();
 
-      const tx = await this.submitWrite(() => this.router.signMemo(memoId, isApproved, reason));
+      const tx = await this.submitWrite(
+        () => this.router.signMemo(memoId, isApproved, reason),
+        () => this.isMemoUnsigned(memoId)
+      );
       const receipt = await retryOnInvalidBlockHeight<ethers.ContractTransactionReceipt | null>(
         () => tx.wait(),
         this.logger
